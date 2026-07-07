@@ -45,8 +45,13 @@ app.get('/api/meta', (req, res) => res.json(META));
 
 // Load the bundled example board if it is available next to the project.
 app.get('/api/example', (req, res) => {
-  const dir = path.join(__dirname, '..', '..', 'platine', 'gerbers');
+  const candidates = [
+    path.join(__dirname, '..', 'gerbers'),
+    path.join(__dirname, '..', '..', 'platine', 'gerbers'),
+  ];
+  const dir = candidates.find((d) => fs.existsSync(path.join(d, 'i2c_bus_board-F_Cu.gbr')));
   try {
+    if (!dir) throw new Error('example dir not found');
     const read = (name) => fs.readFileSync(path.join(dir, name), 'utf8');
     res.json({
       copper: read('i2c_bus_board-F_Cu.gbr'),

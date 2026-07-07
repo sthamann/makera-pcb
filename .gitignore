@@ -1,6 +1,7 @@
 node_modules/
 makera-out/
 out/
+videos/
 *.log
 .DS_Store
 .env
