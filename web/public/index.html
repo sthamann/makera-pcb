@@ -17,6 +17,7 @@
         </div>
       </div>
       <div class="topbar-actions">
+        <button id="machHeaderState" class="pill off hdr-pill" data-i18n="machine.hdrDisconnected" data-i18n-title="machine.hdrHint" title="Maschinen-Verbindung (Tab Maschine)">Maschine getrennt</button>
         <button id="generate" class="btn primary" disabled data-i18n="btn.generate">G-Code erzeugen</button>
         <button id="loadExample" class="btn ghost" data-i18n="btn.loadExample">Beispiel-Board laden</button>
         <select id="langSel" class="lang-sel" data-i18n-title="lang.label" title="Sprache">
@@ -232,23 +233,26 @@
           </div>
           <div class="mach-conn">
             <select id="mProfiles" data-i18n-title="conn.profiles" title="Gespeicherte Verbindungen"><option value="" data-i18n="conn.profiles">Gespeicherte Verbindungen…</option></select>
+            <span class="help" tabindex="0" data-i18n-tip="help.profiles">?</span>
             <button id="mSaveConn" class="btn small ghost" data-i18n="conn.save" data-i18n-title="conn.saveTitle" title="Aktuelle IP/Port speichern">Speichern</button>
             <button id="mDelConn" class="btn small ghost" data-i18n="conn.delete" data-i18n-title="conn.deleteTitle" title="Ausgewählte Verbindung löschen">Löschen</button>
           </div>
           <div class="mach-conn">
             <button id="mDiscover" class="btn small" data-i18n="machine.discover">Suchen</button>
+            <span class="help" tabindex="0" data-i18n-tip="help.discover">?</span>
             <input id="mIp" type="text" data-i18n-ph="machine.ipPh" placeholder="192.168.x.x" />
             <input id="mPort" type="number" value="2222" class="port" />
             <button id="mConnect" class="btn small" data-i18n="machine.connect">Verbinden</button>
             <button id="mDisconnect" class="btn small ghost" disabled data-i18n="machine.disconnect">Trennen</button>
+            <span class="help" tabindex="0" data-i18n-tip="help.connect">?</span>
           </div>
           <div id="mFound" class="found"></div>
           <div id="mStatus" class="mach-status hidden">
-            <div class="stat"><span data-i18n="stat.state">Status</span><b data-s="state">—</b></div>
-            <div class="stat"><span data-i18n="stat.wpos">WPos X/Y/Z</span><b data-s="wpos">—</b></div>
-            <div class="stat"><span data-i18n="stat.feed">Vorschub</span><b data-s="feed">—</b></div>
-            <div class="stat"><span data-i18n="stat.spin">Spindel</span><b data-s="spin">—</b></div>
-            <div class="stat"><span data-i18n="stat.tool">Werkzeug</span><b data-s="tool">—</b></div>
+            <div class="stat"><span data-i18n="stat.state">Status</span> <span class="help" tabindex="0" data-i18n-tip="help.state">?</span><b data-s="state">—</b></div>
+            <div class="stat"><span data-i18n="stat.wpos">WPos X/Y/Z</span> <span class="help" tabindex="0" data-i18n-tip="help.wpos">?</span><b data-s="wpos">—</b></div>
+            <div class="stat"><span data-i18n="stat.feed">Vorschub</span> <span class="help" tabindex="0" data-i18n-tip="help.feed">?</span><b data-s="feed">—</b></div>
+            <div class="stat"><span data-i18n="stat.spin">Spindel</span> <span class="help" tabindex="0" data-i18n-tip="help.spin">?</span><b data-s="spin">—</b></div>
+            <div class="stat"><span data-i18n="stat.tool">Werkzeug</span> <span class="help" tabindex="0" data-i18n-tip="help.tool">?</span><b data-s="tool">—</b></div>
           </div>
           <div id="machDiag" class="mach-diag hidden"></div>
           <div id="machAlarm" class="mach-alarm hidden"></div>
@@ -260,9 +264,11 @@
 
           <div class="dc-cols">
             <div class="jog">
-              <div class="jog-head"><span data-i18n="jog.jog">Jog</span> <span class="muted" data-i18n="jog.step">Schritt</span>
+              <div class="jog-head"><span data-i18n="jog.jog">Jog</span> <span class="help" tabindex="0" data-i18n-tip="help.jog">?</span> <span class="muted" data-i18n="jog.step">Schritt</span>
                 <select id="jogStep"><option>0.1</option><option selected>1</option><option>10</option></select>
+                <span class="help" tabindex="0" data-i18n-tip="help.jogStep">?</span>
                 <span class="muted" data-i18n="jog.feed">F</span><input id="jogFeed" type="number" value="800" class="jogfeed" />
+                <span class="help" tabindex="0" data-i18n-tip="help.jogFeed">?</span>
               </div>
               <div class="jog-pad">
                 <button class="jbtn" data-jog="Y" data-sign="1" style="grid-area:yp">Y+</button>
@@ -272,48 +278,57 @@
                 <button class="jbtn" data-jog="Y" data-sign="-1" style="grid-area:ym">Y−</button>
                 <button class="jbtn" data-jog="Z" data-sign="1" style="grid-area:zp">Z+</button>
                 <button class="jbtn" data-jog="Z" data-sign="-1" style="grid-area:zm">Z−</button>
-                <button class="jbtn" data-jog="A" data-sign="-1" style="grid-area:am">A−</button>
-                <button class="jbtn" data-jog="A" data-sign="1" style="grid-area:ap">A+</button>
+                <button class="jbtn" data-jog="A" data-sign="-1" style="grid-area:am" title="A −">A−</button>
+                <button class="jbtn" data-jog="A" data-sign="1" style="grid-area:ap" title="A +">A+</button>
               </div>
+              <p class="muted jog-hint" data-i18n="jog.aHint">A = optionale 4. (Dreh-)Achse · Button gedrückt halten = kontinuierlich fahren, loslassen stoppt.</p>
             </div>
             <div class="dc-actions">
-              <button class="btn small ghost" data-action="unlock" data-i18n="dc.unlock">Entsperren ($X)</button>
-              <button class="btn small ghost" data-action="reset" data-i18n="dc.reset">Reset</button>
-              <button class="btn small ghost" data-action="setOriginXYZ" data-i18n="dc.setOriginXYZ">Nullpunkt setzen (XYZ)</button>
-              <button class="btn small ghost" data-action="setOriginXY" data-i18n="dc.setOriginXY">Nullpunkt XY</button>
-              <button class="btn small ghost" data-action="gotoClearance" data-i18n="dc.gotoClearance">→ Freifahren</button>
-              <button class="btn small ghost" data-action="gotoOrigin" data-i18n="dc.gotoOrigin">→ Nullpunkt</button>
-              <button class="btn small ghost" data-action="margin" data-i18n="dc.margin">Rand abfahren</button>
-              <button class="btn small ghost" data-action="probe" data-i18n="dc.probe">Z antasten</button>
-              <button class="btn small ghost" data-action="level" data-i18n="dc.level">Auto-Leveling</button>
+              <div class="act"><button class="btn small ghost" data-action="unlock" data-i18n="dc.unlock">Entsperren ($X)</button><span class="help" tabindex="0" data-i18n-tip="help.unlock">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="reset" data-i18n="dc.reset">Reset</button><span class="help" tabindex="0" data-i18n-tip="help.reset">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="setOriginXYZ" data-i18n="dc.setOriginXYZ">Nullpunkt setzen (XYZ)</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginXYZ">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="setOriginXY" data-i18n="dc.setOriginXY">Nullpunkt XY</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginXY">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="gotoClearance" data-i18n="dc.gotoClearance">→ Freifahren</button><span class="help" tabindex="0" data-i18n-tip="help.gotoClearance">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="gotoOrigin" data-i18n="dc.gotoOrigin">→ Nullpunkt</button><span class="help" tabindex="0" data-i18n-tip="help.gotoOrigin">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="margin" data-i18n="dc.margin">Rand abfahren</button><span class="help" tabindex="0" data-i18n-tip="help.margin">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="probe" data-i18n="dc.probe">Z antasten</button><span class="help" tabindex="0" data-i18n-tip="help.probe">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="level" data-i18n="dc.level">Auto-Leveling</button><span class="help" tabindex="0" data-i18n-tip="help.level">?</span></div>
+              <div class="goto-bar">
+                <span class="muted" data-i18n="dc.gotoXY">Gehe zu</span>
+                <span class="help" tabindex="0" data-i18n-tip="help.gotoXY">?</span>
+                <label>X<input id="gotoX" type="number" step="0.1" value="15" /></label>
+                <label>Y<input id="gotoY" type="number" step="0.1" value="10" /></label>
+                <button class="btn small ghost" data-action="gotoXY" data-i18n="dc.gotoGo" data-i18n-title="dc.gotoXYTitle" title="Erst Freifahrhöhe (Z), dann X/Y im aktuellen Werk-Koordinatensystem anfahren.">Anfahren</button>
+              </div>
             </div>
           </div>
 
           <details class="dc-extra">
             <summary data-i18n="dc.extra">Zubehör &amp; Werkzeugwechsel</summary>
             <div class="dc-grid">
-              <div class="dc-group"><span data-i18n="dc.light">Licht</span>
+              <div class="dc-group"><span data-i18n="dc.light">Licht</span><span class="help" tabindex="0" data-i18n-tip="help.light">?</span>
                 <button class="btn small ghost" data-action="lightOn" data-i18n="dc.on">An</button>
                 <button class="btn small ghost" data-action="lightOff" data-i18n="dc.off">Aus</button></div>
-              <div class="dc-group"><span data-i18n="dc.vac">Absaugung (auto)</span>
+              <div class="dc-group"><span data-i18n="dc.vac">Absaugung (auto)</span><span class="help" tabindex="0" data-i18n-tip="help.vac">?</span>
                 <button class="btn small ghost" data-action="vacOn" data-i18n="dc.on">An</button>
                 <button class="btn small ghost" data-action="vacOff" data-i18n="dc.off">Aus</button></div>
-              <div class="dc-group"><span data-i18n="dc.air">Air Assist</span>
+              <div class="dc-group"><span data-i18n="dc.air">Air Assist</span><span class="help" tabindex="0" data-i18n-tip="help.air">?</span>
                 <button class="btn small ghost" data-action="airOn" data-i18n="dc.on">An</button>
                 <button class="btn small ghost" data-action="airOff" data-i18n="dc.off">Aus</button></div>
-              <div class="dc-group"><span data-i18n="dc.fan">Spindel-Lüfter</span>
+              <div class="dc-group"><span data-i18n="dc.fan">Spindel-Lüfter</span><span class="help" tabindex="0" data-i18n-tip="help.fan">?</span>
                 <button class="btn small ghost" data-action="fanOn" data-i18n="dc.on">An</button>
                 <button class="btn small ghost" data-action="fanOff" data-i18n="dc.off">Aus</button></div>
-              <div class="dc-group"><span data-i18n="dc.beep">Piep (Air)</span>
+              <div class="dc-group"><span data-i18n="dc.beep">Piep (Air)</span><span class="help" tabindex="0" data-i18n-tip="help.beep">?</span>
                 <button class="btn small ghost" data-action="beepOn" data-i18n="dc.on">An</button>
                 <button class="btn small ghost" data-action="beepOff" data-i18n="dc.off">Aus</button></div>
-              <div class="dc-group"><span data-i18n="dc.collet">Spannzange</span>
+              <div class="dc-group"><span data-i18n="dc.collet">Spannzange</span><span class="help" tabindex="0" data-i18n-tip="help.collet">?</span>
                 <button class="btn small ghost" data-action="colletClose" title="M490.1" data-i18n="dc.close">Schließen</button>
                 <button class="btn small ghost" data-action="colletOpen" title="M490.2" data-i18n="dc.open">Öffnen</button></div>
-              <div class="dc-group"><span data-i18n="dc.tool">Werkzeug</span>
+              <div class="dc-group"><span data-i18n="dc.tool">Werkzeug</span><span class="help" tabindex="0" data-i18n-tip="help.toolgrp">?</span>
+                <button class="btn small ghost" data-action="probeIn" title="M6 T0" data-i18n="dc.probeIn">Probe (T0)</button>
                 <button class="btn small ghost" data-action="calibrate" title="M491" data-i18n="dc.calibrate">Kalibrieren</button>
                 <button class="btn small ghost" data-action="readTemp" title="M105" data-i18n="dc.readTemp">Temp lesen</button></div>
-              <div class="dc-group"><span data-i18n="dc.heightmap">Höhenkarte</span>
+              <div class="dc-group"><span data-i18n="dc.heightmap">Höhenkarte</span><span class="help" tabindex="0" data-i18n-tip="help.heightmap">?</span>
                 <button class="btn small ghost" data-action="levelShow" title="M375.1" data-i18n="dc.show">Anzeigen</button>
                 <button class="btn small ghost" data-action="levelClear" title="M370" data-i18n="dc.clear">Löschen</button></div>
             </div>
@@ -322,16 +337,21 @@
           <div class="mdi-row">
             <input id="mdiInput" type="text" data-i18n-ph="mdi.ph" placeholder="G-Code / Befehl (Enter)" />
             <button id="mdiSend" class="btn small" data-i18n="mdi.send">Senden</button>
+            <span class="help" tabindex="0" data-i18n-tip="help.mdi">?</span>
           </div>
           <div class="run-row">
             <select id="runFile"></select>
+            <span class="help" tabindex="0" data-i18n-tip="help.runFile">?</span>
             <button id="mUpload" class="btn small" data-i18n="run.upload">Hochladen</button>
+            <span class="help" tabindex="0" data-i18n-tip="help.upload">?</span>
             <button id="mRun" class="btn small danger" data-i18n="run.uploadStart">Hochladen &amp; Start</button>
+            <span class="help" tabindex="0" data-i18n-tip="help.uploadStart">?</span>
           </div>
           <div class="run-row">
             <button class="btn small" data-action="pause" data-i18n="run.pause">⏸ Pause</button>
             <button class="btn small" data-action="resume" data-i18n="run.resume">▶ Fortsetzen</button>
             <button class="btn small danger" data-action="stop" data-i18n="run.stop">■ Stop</button>
+            <span class="help" tabindex="0" data-i18n-tip="help.runControls">?</span>
           </div>
           <pre id="mConsole" class="console"></pre>
 

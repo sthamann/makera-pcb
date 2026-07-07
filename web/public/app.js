@@ -666,7 +666,7 @@ function buildFabSteps() {
   // (margin/Z/leveling) first, cutting tool only afterwards.
   steps.push({ id: 'fixate', kind: 'manual', title: t('step.fixate.t'), instr: t('step.fixate.i') });
   steps.push({ id: 'setOrigin', kind: 'setup', action: 'setOriginXY', title: t('step.setOrigin.t'), instr: t('step.setOrigin.i') });
-  steps.push({ id: 'insertProbe', kind: 'manual', title: t('step.insertProbe.t'), instr: t('step.insertProbe.i') });
+  steps.push({ id: 'insertProbe', kind: 'setup', action: 'probeIn', title: t('step.insertProbe.t'), instr: t('step.insertProbe.i') });
   steps.push({ id: 'autoSetup', kind: 'setup', action: 'autoSetup', title: t('step.autoSetup.t'), instr: t('step.autoSetup.i') });
   steps.push({ id: 'insertTool', kind: 'manual', title: t('step.insertTool.t'), tool: isoTool, instr: t('step.insertTool.i') });
 
@@ -1173,6 +1173,7 @@ async function machineConnect() {
     $('#mDisconnect').disabled = false;
     $('#mStatus').classList.remove('hidden');
     startStatusPoll();
+    setPill('on', t('machine.connectedToast'));
     toast(t('machine.connectedToast'));
     logEvent('log.connected', { ip });
   } catch (err) { toast(t('machine.connectFail', { msg: err.message }), true); }
@@ -1225,6 +1226,7 @@ async function pollStatus() {
     $('[data-s="feed"]').textContent = s.feed ? s.feed[0].toFixed(0) : '—';
     $('[data-s="spin"]').textContent = s.spindle ? s.spindle[0].toFixed(0) : '—';
     $('[data-s="tool"]').textContent = s.tool ? `T${s.tool[0]}` : '—';
+    state.machine.tool = s.tool ? s.tool[0] : null;
     $('#mConsole').textContent = (d.log || []).join('\n');
     $('#mConsole').scrollTop = $('#mConsole').scrollHeight;
 
@@ -1263,7 +1265,16 @@ async function pollStatus() {
     }
   } catch { /* transient */ }
 }
-function setPill(cls, text) { const p = $('#machState'); p.className = 'pill ' + cls; p.textContent = text; }
+function setPill(cls, text) {
+  const p = $('#machState');
+  if (p) { p.className = 'pill ' + cls; p.textContent = text; }
+  const h = $('#machHeaderState');
+  if (h) {
+    const off = cls === 'off';
+    h.className = 'pill hdr-pill ' + (off ? 'off' : (cls === 'run' ? 'run' : 'on'));
+    h.textContent = t(off ? 'machine.hdrDisconnected' : 'machine.hdrConnected');
+  }
+}
 
 // Plain-language hint for a raw machine alarm/error message (Makera/Smoothie).
 function explainAlarm(text) {
@@ -1308,6 +1319,71 @@ async function machineJog(axis, sign) {
   const dist = (sign < 0 ? '-' : '') + step;
   try { await api('/api/machine/jog', { axis, dist, feed }); } catch (err) { toast(err.message, true); }
 }
+// Hold-to-jog: a quick tap moves one step; holding a button jogs continuously
+// (a single large jog) until release, when a realtime jog-cancel (0x19) stops it.
+const JOG_TRAVEL = { X: 340, Y: 240, Z: 130, A: 720 };
+async function machineJogContinuous(axis, sign) {
+  if (!state.machine.connected) return toast(t('machine.notConnected'), true);
+  const feed = Number($('#jogFeed').value) || 800;
+  const dist = (sign < 0 ? '-' : '') + (JOG_TRAVEL[axis] || 100);
+  try { await api('/api/machine/jog', { axis, dist, feed }); } catch (err) { toast(err.message, true); }
+}
+async function machineJogStop() {
+  if (!state.machine.connected) return;
+  try { await api('/api/machine/realtime', { code: 'jogstop' }); } catch { /* ignore */ }
+}
+function bindJog() {
+  $$('[data-jog]').forEach((b) => {
+    const axis = b.dataset.jog;
+    const sign = Number(b.dataset.sign);
+    let holdTimer = null;
+    let continuous = false;
+    const clearHold = () => { if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; } };
+    b.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      continuous = false;
+      holdTimer = setTimeout(() => { continuous = true; machineJogContinuous(axis, sign); }, 300);
+    });
+    b.addEventListener('pointerup', () => {
+      clearHold();
+      if (continuous) { machineJogStop(); continuous = false; }
+      else { machineJog(axis, sign); } // quick tap = one step
+    });
+    const abort = () => { clearHold(); if (continuous) { machineJogStop(); continuous = false; } };
+    b.addEventListener('pointerleave', abort);
+    b.addEventListener('pointercancel', abort);
+  });
+}
+// ---------- help tooltips (the "?" badges) ----------
+let helpTipEl = null;
+function showHelpTip(badge) {
+  const text = badge.getAttribute('data-tip');
+  if (!text) return;
+  if (!helpTipEl) { helpTipEl = document.createElement('div'); helpTipEl.id = 'helpTip'; document.body.appendChild(helpTipEl); }
+  helpTipEl.textContent = text;
+  helpTipEl.style.display = 'block';
+  const r = badge.getBoundingClientRect();
+  const tw = helpTipEl.offsetWidth;
+  const th = helpTipEl.offsetHeight;
+  let left = r.left + r.width / 2 - tw / 2;
+  left = Math.max(8, Math.min(left, window.innerWidth - tw - 8));
+  let top = r.top - th - 8;
+  helpTipEl.classList.toggle('below', top < 8);
+  if (top < 8) top = r.bottom + 8;
+  helpTipEl.style.left = `${left}px`;
+  helpTipEl.style.top = `${top}px`;
+}
+function hideHelpTip() { if (helpTipEl) helpTipEl.style.display = 'none'; }
+function initHelpTips() {
+  const findBadge = (e) => (e.target instanceof Element ? e.target.closest('.help[data-tip]') : null);
+  document.addEventListener('pointerover', (e) => { const b = findBadge(e); if (b) showHelpTip(b); });
+  document.addEventListener('pointerout', (e) => { if (e.target instanceof Element && e.target.closest('.help')) hideHelpTip(); });
+  document.addEventListener('focusin', (e) => { const b = findBadge(e); if (b) showHelpTip(b); });
+  document.addEventListener('focusout', (e) => { if (e.target instanceof Element && e.target.closest('.help')) hideHelpTip(); });
+  // a click on the "?" must never trigger the control it sits next to / inside
+  document.addEventListener('click', (e) => { if (e.target instanceof Element && e.target.closest('.help')) { e.preventDefault(); e.stopPropagation(); } }, true);
+  window.addEventListener('scroll', hideHelpTip, true);
+}
 function machineAction(action) {
   const b = state.result?.board;
   const w = b ? b.width.toFixed(2) : 0;
@@ -1320,29 +1396,59 @@ function machineAction(action) {
     case 'pause': return machineRealtime('pause');
     case 'resume': return machineRealtime('resume');
     case 'stop': if (confirm(t('confirm.stop'))) machineRealtime('reset'); return;
-    case 'setOriginXYZ': if (confirm(t('confirm.setOriginXYZ'))) machineCommand('G10 L20 P0 X0 Y0 Z0'); return;
-    case 'setOriginXY': if (confirm(t('confirm.setOriginXY'))) machineCommand('G10 L20 P0 X0 Y0'); return;
-    case 'gotoClearance': return machineCommand('M496.1');
-    case 'gotoOrigin': return machineCommand('M496.2');
-    case 'margin': if (!need()) return; if (confirm(t('confirm.margin'))) machineCommand(`M495 X0Y0C${w}D${h}`); return;
-    case 'probe': if (confirm(t('confirm.probe'))) machineCommand('M495 X0Y0O0'); return;
+    case 'setOriginXYZ': if (confirm(t('confirm.setOriginXYZ'))) { machineCommand('G10 L20 P0 X0 Y0 Z0'); toast(t('machine.originSet')); } return;
+    case 'setOriginXY': if (confirm(t('confirm.setOriginXY'))) { machineCommand('G10 L20 P0 X0 Y0'); toast(t('machine.originSet')); } return;
+    case 'gotoClearance': machineCommand('M496.1'); toast(t('machine.cmdSent')); return;
+    case 'gotoOrigin':
+      // We set the work origin as a G54 offset (G10 L20 P0), so we must return via the
+      // SAME coordinate system: raise Z to clearance, then rapid to work X0/Y0.
+      // (M496.2 goes to the Carvera's separate anchor-relative work origin and would NOT
+      //  match a G10-set zero — that is why "go to origin" didn't return before.)
+      machineCommand('M496.1');
+      machineCommand('G90 G0 X0 Y0');
+      toast(t('machine.cmdSent'));
+      return;
+    case 'gotoXY': {
+      const gx = parseFloat($('#gotoX').value);
+      const gy = parseFloat($('#gotoY').value);
+      const parts = [];
+      if (Number.isFinite(gx)) parts.push('X' + gx);
+      if (Number.isFinite(gy)) parts.push('Y' + gy);
+      if (!parts.length) return toast(t('machine.gotoNeedXY'), true);
+      if (!confirm(t('confirm.gotoXY', { x: Number.isFinite(gx) ? gx : '–', y: Number.isFinite(gy) ? gy : '–' }))) return;
+      machineCommand('M496.1'); // raise to clearance (Z-safe) first
+      machineCommand('G90 G0 ' + parts.join(' ')); // then move in the active work coordinate system
+      toast(t('machine.cmdSent'));
+      return;
+    }
+    case 'margin': if (!need()) return; if (confirm(t('confirm.margin'))) { machineCommand(`M495 X0 Y0 C${w} D${h}`); toast(t('machine.cmdSent')); } return;
+    case 'probe': if (confirm(t('confirm.probe'))) { machineCommand('M495 X0 Y0 O0'); toast(t('machine.cmdSent')); } return;
     case 'level': {
       if (!need()) return;
       // Makera PCB default is a 5×5 grid at 2 mm detection height (LED example);
       // add points for larger boards, capped at 9×9.
       const i = Math.min(9, Math.max(5, Math.round(b.width / 15)));
       const j = Math.min(9, Math.max(5, Math.round(b.height / 15)));
-      if (confirm(t('confirm.level', { i, j }))) machineCommand(`M495 X0Y0A${w}B${h}I${i}J${j}H2`);
+      if (confirm(t('confirm.level', { i, j }))) { machineCommand(`M495 X0 Y0 A${w} B${h} I${i} J${j} H2`); toast(t('machine.cmdSent')); }
       return;
     }
+    // Change to the probe (T0). M495 (margin/Z-probe/leveling) refuses with
+    // "Change to probe tool first!" unless the machine's active tool is the probe —
+    // inserting it physically is not enough, the firmware needs an M6 T0.
+    case 'probeIn': if (confirm(t('confirm.probeIn'))) { machineCommand('M6 T0'); toast(t('machine.cmdSent')); } return;
     case 'autoSetup': {
       if (!need()) return;
       // One combined M495 = Makera "Config and Run": Scan Margin (C/D) +
       // Auto Z Probe (O0) + Auto Leveling (A/B grid, H2) + return to origin (P1).
       const i = Math.min(9, Math.max(5, Math.round(b.width / 15)));
       const j = Math.min(9, Math.max(5, Math.round(b.height / 15)));
-      if (confirm(t('confirm.autoSetup', { i, j })))
-        machineCommand(`M495 X0Y0C${w}D${h}O0A${w}B${h}I${i}J${j}H2P1`);
+      if (confirm(t('confirm.autoSetup', { i, j }))) {
+        // M495 needs the probe as the active tool — switch to it first if the machine
+        // still reports a different tool (e.g. T6 left over from a previous job).
+        if (state.machine.tool != null && state.machine.tool !== 0) machineCommand('M6 T0');
+        machineCommand(`M495 X0 Y0 C${w} D${h} O0 A${w} B${h} I${i} J${j} H2 P1`);
+        toast(t('machine.cmdSent'));
+      }
       return;
     }
     // --- accessories (Supported Codes) ---
@@ -1949,13 +2055,15 @@ function init() {
   });
 
   // machine
+  $('#machHeaderState').addEventListener('click', () => switchWf('machine'));
   $('#mDiscover').addEventListener('click', machineDiscover);
   $('#mConnect').addEventListener('click', machineConnect);
   $('#mDisconnect').addEventListener('click', machineDisconnect);
   $('#mdiSend').addEventListener('click', () => { const v = $('#mdiInput').value.trim(); if (v) { machineCommand(v); $('#mdiInput').value = ''; } });
   $('#mdiInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#mdiSend').click(); });
   $$('[data-action]').forEach((b) => b.addEventListener('click', () => machineAction(b.dataset.action)));
-  $$('[data-jog]').forEach((b) => b.addEventListener('click', () => machineJog(b.dataset.jog, Number(b.dataset.sign))));
+  bindJog();
+  initHelpTips();
   $('#mUpload').addEventListener('click', () => machineUpload(false));
   $('#mRun').addEventListener('click', () => machineUpload(true));
   $('#machDiag').addEventListener('click', (e) => { if (e.target && e.target.id === 'machRetry') machineRetry(); });
