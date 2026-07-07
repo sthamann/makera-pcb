@@ -1,0 +1,32 @@
+{
+  "name": "makera-pcb",
+  "version": "1.0.0",
+  "description": "Gerber/Excellon -> Makera Carvera Air G-code. Isolation milling, drilling and outline cutting from KiCad output, with feasibility checks and a browser preview.",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/makera-pcb/makera-pcb"
+  },
+  "homepage": "https://github.com/makera-pcb/makera-pcb",
+  "bin": {
+    "makera-pcb": "src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "cli": "node src/cli.js",
+    "build:viewer": "esbuild web/public/view3d.js --bundle --format=iife --minify --outfile=web/public/view3d.bundle.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "clipper-lib": "^6.4.2",
+    "express": "^4.19.2",
+    "three": "^0.185.1"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  }
+}

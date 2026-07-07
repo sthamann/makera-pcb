@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>makera-pcb · Gerber → Makera Carvera Air</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">◑</span>
+        <div>
+          <h1>makera-pcb <a id="appVersion" class="ver" href="#" target="_blank" rel="noopener" title="Version">v1.0.0</a></h1>
+          <p data-i18n="app.tagline">Gerber &amp; Bohrdaten → fräsfertiger G-Code · 3D-Vorschau · direkt an den Carvera Air</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button id="generate" class="btn primary" disabled data-i18n="btn.generate">G-Code erzeugen</button>
+        <button id="loadExample" class="btn ghost" data-i18n="btn.loadExample">Beispiel-Board laden</button>
+        <select id="langSel" class="lang-sel" data-i18n-title="lang.label" title="Sprache">
+          <option value="de">DE</option>
+          <option value="en">EN</option>
+        </select>
+        <a id="ghLink" class="icon-link hidden" href="#" target="_blank" rel="noopener" title="GitHub" aria-label="GitHub">
+          <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        </a>
+      </div>
+    </header>
+
+    <div class="projbar">
+      <span class="projbar-label" data-i18n="proj.label">Projekt</span>
+      <select id="projSel"><option value="" data-i18n="proj.none">— Kein Projekt —</option></select>
+      <button id="projNew" class="btn ghost small" data-i18n="proj.new">Neu</button>
+      <button id="projSave" class="btn ghost small" data-i18n="proj.save">Speichern</button>
+      <button id="projSaveAs" class="btn ghost small" data-i18n="proj.saveAs">Speichern als…</button>
+      <button id="projDelete" class="btn ghost small" data-i18n="proj.delete">Löschen</button>
+      <button id="projExport" class="btn ghost small" data-i18n="proj.export">Export</button>
+      <button id="projImport" class="btn ghost small" data-i18n="proj.import">Import</button>
+      <input id="projImportFile" type="file" accept="application/json,.json" hidden />
+    </div>
+
+    <nav class="wf-tabs">
+      <button class="wf-tab active" data-wf="material" data-i18n="nav.material">1 · Material &amp; Dateien</button>
+      <button class="wf-tab" data-wf="config" data-i18n="nav.config">2 · Fräs-Einstellungen</button>
+      <button class="wf-tab" data-wf="tools" data-i18n="nav.tools">3 · Werkzeuge</button>
+      <button class="wf-tab" data-wf="preview" data-i18n="nav.preview">4 · Vorschau</button>
+      <button class="wf-tab" data-wf="ai" data-i18n="nav.ai">5 · KI-Check</button>
+      <button class="wf-tab" data-wf="machine" data-i18n="nav.machine">6 · Maschine</button>
+      <button class="wf-tab" data-wf="fab" data-i18n="nav.fab">7 · Fertigung</button>
+      <button class="wf-tab" data-wf="result" data-i18n="nav.result">8 · Ergebnis</button>
+    </nav>
+
+    <main class="wf-main">
+      <!-- 1 · MATERIAL & DATEIEN -->
+      <section class="wf-panel active" data-wf-panel="material">
+        <div class="two-col">
+          <div class="card">
+            <h2 data-i18n="files.title">Dateien</h2>
+            <div id="dropzone" class="dropzone">
+              <p data-i18n-html="files.drop"><strong>Gerber-Dateien hierher ziehen</strong> oder klicken</p>
+              <p class="muted" data-i18n="files.dropHint">F.Cu, Edge.Cuts, Bohrdatei (.drl) &amp; optional Silkscreen</p>
+              <input id="fileInput" type="file" multiple hidden />
+            </div>
+            <div class="slots">
+              <div class="slot" data-role="copper"><span class="slot-label" data-i18n="files.copper">Kupfer (F.Cu)</span><span class="slot-name" data-name>—</span></div>
+              <div class="slot" data-role="edge"><span class="slot-label" data-i18n="files.edge">Umriss (Edge.Cuts)</span><span class="slot-name" data-name>—</span></div>
+              <div class="slot" data-role="drill"><span class="slot-label" data-i18n="files.drill">Bohrdaten (.drl)</span><span class="slot-name" data-name>—</span></div>
+              <div class="slot" data-role="silk"><span class="slot-label" data-i18n="files.silk">Silkscreen (optional)</span><span class="slot-name" data-name>—</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <h2 data-i18n="mat.title">Material / Rohling</h2>
+            <fieldset>
+              <legend data-i18n="mat.legend">Makera-PCB-Rohling</legend>
+              <label><span data-i18n="mat.material">Material</span><select id="matPreset"></select></label>
+              <label><span data-i18n="mat.stockX">Stock X (mm)</span><input type="number" step="1" data-path="stock.sizeX" value="150" /></label>
+              <label><span data-i18n="mat.stockY">Stock Y (mm)</span><span style="display:flex;gap:4px"><input type="number" step="1" data-path="stock.sizeY" value="100" /><button id="swapStock" class="btn ghost small" data-i18n-title="mat.swap" title="X/Y tauschen" type="button">⇄</button></span></label>
+              <label><span data-i18n="mat.thickness">Materialdicke Z (mm)</span><input type="number" step="0.1" data-path="material.thickness" value="1.5" /></label>
+            </fieldset>
+            <fieldset>
+              <legend data-i18n="mat.generalLegend">Allgemein</legend>
+              <label><span data-i18n="mat.safeZ">Sicherheits-Z (mm)</span><input type="number" step="0.5" data-path="safeZ" value="5" /></label>
+              <label><span data-i18n="mat.travelZ">Reise-Z (mm)</span><input type="number" step="0.1" data-path="travelZ" value="1.5" /></label>
+            </fieldset>
+            <div class="canvas-wrap mat-canvas-wrap">
+              <canvas id="matCanvas" width="600" height="360"></canvas>
+            </div>
+            <div id="matInfo" class="board-info"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2 · FRÄS-EINSTELLUNGEN -->
+      <section class="wf-panel" data-wf-panel="config">
+        <div class="card">
+          <h2 data-i18n="config.title">Fräs-Einstellungen</h2>
+          <div class="fs-grid">
+            <fieldset>
+              <legend data-i18n="iso.legend">Isolation</legend>
+              <label><span data-i18n="iso.tool">Werkzeug</span><select data-path="isolation.tool"><option value="vbit" selected data-i18n="iso.vbit">V-Bit</option><option value="endmill" data-i18n="iso.endmill">Flachfräser</option></select></label>
+              <label><span data-i18n="iso.angle">V-Bit Winkel (°)</span><input type="number" step="1" data-path="isolation.vbitAngleDeg" value="30" /></label>
+              <label><span data-i18n="iso.tip">Spitzenbreite (mm)</span><input type="number" step="0.01" data-path="isolation.tipWidth" value="0.1" /></label>
+              <label><span data-i18n="iso.endmillDia">Flachfräser Ø (mm)</span><input type="number" step="0.05" data-path="isolation.endmillDiameter" value="0.2" /></label>
+              <label><span data-i18n="iso.cutDepth">Frästiefe (mm)</span><input type="number" step="0.01" data-path="isolation.cutDepth" value="0.15" /></label>
+              <label><span data-i18n="iso.passes">Bahnen</span><input type="number" step="1" min="1" data-path="isolation.passes" value="2" /></label>
+              <label><span data-i18n="iso.overlap">Überlappung</span><input type="number" step="0.05" data-path="isolation.overlap" value="0.4" /></label>
+              <label><span data-i18n="iso.feed">Vorschub XY</span><input type="number" step="10" data-path="isolation.feedXY" value="300" /></label>
+              <label><span data-i18n="iso.rpm">Drehzahl</span><input type="number" step="500" data-path="isolation.rpm" value="12000" /></label>
+            </fieldset>
+            <fieldset>
+              <legend data-i18n="drill.legend">Bohren</legend>
+              <label><span data-i18n="drill.through">Durchbruch-Zugabe (mm)</span><input type="number" step="0.1" data-path="drill.throughMargin" value="0.3" /></label>
+              <label><span data-i18n="drill.peck">Peck-Tiefe (mm)</span><input type="number" step="0.1" data-path="drill.peck" value="0.6" /></label>
+              <label><span data-i18n="drill.plunge">Plunge-Vorschub</span><input type="number" step="5" data-path="drill.plungeFeed" value="60" /></label>
+              <label><span data-i18n="drill.rpm">Drehzahl</span><input type="number" step="500" data-path="drill.rpm" value="10000" /></label>
+            </fieldset>
+            <fieldset>
+              <legend data-i18n="out.legend">Außenkontur</legend>
+              <label><span data-i18n="out.dia">Fräser Ø (mm)</span><input type="number" step="0.1" data-path="outline.cutterDiameter" value="1.0" /></label>
+              <label><span data-i18n="out.depth">Tiefe/Bahn (mm)</span><input type="number" step="0.1" data-path="outline.depthPerPass" value="0.4" /></label>
+              <label><span data-i18n="out.feed">Vorschub XY</span><input type="number" step="10" data-path="outline.feedXY" value="250" /></label>
+              <label><span data-i18n="out.rpm">Drehzahl</span><input type="number" step="500" data-path="outline.rpm" value="12000" /></label>
+              <label><span data-i18n="out.tabs">Haltestege</span><input type="number" step="1" min="0" data-path="outline.tabs" value="4" /></label>
+              <label><span data-i18n="out.tabW">Steg-Breite (mm)</span><input type="number" step="0.5" data-path="outline.tabWidth" value="2" /></label>
+              <label><span data-i18n="out.tabH">Steg-Höhe (mm)</span><input type="number" step="0.1" data-path="outline.tabHeight" value="0.4" /></label>
+              <label><span data-i18n="out.side">Seite</span><select data-path="outline.offsetSide"><option value="outside" selected data-i18n="out.outside">außen</option><option value="on" data-i18n="out.on">auf Linie</option><option value="inside" data-i18n="out.inside">innen</option></select></label>
+            </fieldset>
+            <fieldset>
+              <legend data-i18n="laser.legend">Laser (Silkscreen-Gravur)</legend>
+              <label><span data-i18n="laser.enable">Aktivieren</span><input type="checkbox" data-path="laser.enable" /></label>
+              <label><span data-i18n="laser.power">Leistung (0–1)</span><input type="number" step="0.05" min="0" max="1" data-path="laser.power" value="0.6" /></label>
+              <label><span data-i18n="laser.feed">Vorschub XY</span><input type="number" step="50" data-path="laser.feedXY" value="600" /></label>
+              <label><span data-i18n="laser.passes">Durchgänge</span><input type="number" step="1" min="1" data-path="laser.passes" value="1" /></label>
+            </fieldset>
+            <fieldset>
+              <legend data-i18n="sm.legend">Lötstopplack (UV)</legend>
+              <label><span data-i18n="sm.enable">Workflow einbeziehen</span><input type="checkbox" data-path="solderMask.enable" /></label>
+              <p class="muted" style="margin:4px 0 0" data-i18n="sm.note">Fügt dem Fertigungsplan die Schritte Auftragen/Aushärten/Entfernen hinzu.</p>
+            </fieldset>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3 · WERKZEUGE -->
+      <section class="wf-panel" data-wf-panel="tools">
+        <div class="card">
+          <div class="preview-head">
+            <h2 data-i18n="tools.title">Werkzeuge (Carvera Air)</h2>
+            <div style="display:flex;gap:6px">
+              <button id="loadStdTools" class="btn ghost small" data-i18n="tools.loadStd" data-i18n-title="tools.loadStdTitle" title="Standard-Carvera-Air-Werkzeuge laden">Standard laden</button>
+              <button id="makeraFeeds" class="btn ghost small" data-i18n="tools.makeraFeeds" data-i18n-title="tools.makeraFeedsTitle" title="Feeds/Speeds aller Werkzeuge aus der offiziellen Makera-PCB-Tabelle setzen">Makera-PCB Feeds</button>
+              <button id="addTool" class="btn ghost small" data-i18n="tools.add">+ Werkzeug</button>
+            </div>
+          </div>
+          <p class="muted" data-i18n-html="tools.desc">Definiere deine Tools (Feed/Plunge/RPM pro Werkzeug) und ordne sie den Schritten zu. Daraus entsteht ein einziges Programm mit <code>M6</code>-Werkzeugwechseln.</p>
+          <table class="tool-table"><thead><tr>
+            <th data-i18n="tools.th.num">T#</th>
+            <th data-i18n="tools.th.type">Typ</th>
+            <th data-i18n="tools.th.dia">Ø</th>
+            <th data-i18n="tools.th.collet">Collet</th>
+            <th data-i18n="tools.th.feed">Feed</th>
+            <th data-i18n="tools.th.plunge">Plunge</th>
+            <th data-i18n="tools.th.rpm">RPM</th>
+            <th data-i18n="tools.th.label">Bezeichnung</th><th></th></tr></thead><tbody id="toolBody"></tbody></table>
+          <h3 class="sub" data-i18n="tools.assign">Zuordnung der Schritte</h3>
+          <div id="assignBox" class="assign-box"></div>
+        </div>
+      </section>
+
+      <!-- 4 · VORSCHAU -->
+      <section class="wf-panel" data-wf-panel="preview">
+        <div class="card">
+          <div class="preview-head">
+            <h2 data-i18n="preview.title">Vorschau</h2>
+            <div class="view-toggle">
+              <button class="vt active" data-view="2d">2D</button>
+              <button class="vt" data-view="3d">3D</button>
+            </div>
+          </div>
+          <div class="legend">
+            <label class="chip cu"><input type="checkbox" data-layer="copper" checked /> <span data-i18n="layer.copper">Kupfer</span></label>
+            <label class="chip silk"><input type="checkbox" data-layer="silk" checked /> <span data-i18n="layer.silk">Silk</span></label>
+            <label class="chip iso"><input type="checkbox" data-layer="isolation" checked /> <span data-i18n="layer.isolation">Isolation</span></label>
+            <label class="chip drill"><input type="checkbox" data-layer="drills" checked /> <span data-i18n="layer.drills">Bohrungen</span></label>
+            <label class="chip out"><input type="checkbox" data-layer="outline" checked /> <span data-i18n="layer.outline">Kontur</span></label>
+            <label class="chip laser"><input type="checkbox" data-layer="laser" checked /> <span data-i18n="layer.laser">Laser</span></label>
+            <label class="chip stock"><input type="checkbox" data-layer="stock" checked /> <span data-i18n="layer.stock">Rohling</span></label>
+          </div>
+          <div class="canvas-wrap">
+            <canvas id="preview" width="900" height="360"></canvas>
+            <div id="view3dHost" class="view3d hidden"></div>
+            <div id="placeholder" class="placeholder" data-i18n="preview.placeholder">Lade ein Board, um die Vorschau zu sehen.</div>
+            <div id="demoBanner" class="demo-banner hidden"></div>
+          </div>
+          <div class="demo-bar">
+            <button id="demoPlay" class="btn small" disabled data-i18n="demo.play">▶ Demo abspielen</button>
+            <button id="demoStop" class="btn small ghost hidden" data-i18n="demo.stop">■ Stop</button>
+            <label class="demo-speed"><span data-i18n="demo.speed">Tempo</span> <input id="demoSpeed" type="range" min="1" max="100" value="45" /></label>
+          </div>
+          <div id="boardInfo" class="board-info"></div>
+        </div>
+      </section>
+
+      <!-- 5 · KI-CHECK -->
+      <section class="wf-panel" data-wf-panel="ai">
+        <div class="card">
+          <div class="preview-head">
+            <h2 data-i18n="ai.title">KI-Check (OpenAI)</h2>
+            <span id="aiState" class="pill off" data-i18n="ai.inactive">inaktiv</span>
+          </div>
+          <p class="muted" data-i18n-html="ai.desc">Prüft und korrigiert deine Konfiguration für genau dieses Board. Der API-Key bleibt lokal im Browser (oder in <code>.env</code>).</p>
+          <div class="ai-row">
+            <input id="aiKey" type="password" data-i18n-ph="ai.keyPh" placeholder="OpenAI API-Key (sk-…)" autocomplete="off" />
+            <input id="aiModel" type="text" value="gpt-5.5" class="ai-model" data-i18n-title="ai.modelTitle" title="Modell" />
+          </div>
+          <div class="ai-actions">
+            <button id="aiReview" class="btn small" disabled data-i18n="ai.review">Konfiguration prüfen</button>
+            <label class="ai-auto"><input type="checkbox" id="aiAuto" /> <span data-i18n="ai.auto">Auto-Check</span></label>
+          </div>
+          <div id="aiResult" class="ai-result"></div>
+        </div>
+      </section>
+
+      <!-- 6 · MASCHINE -->
+      <section class="wf-panel" data-wf-panel="machine">
+        <div class="card">
+          <div class="preview-head">
+            <h2 data-i18n="machine.title">Maschine · Carvera Air</h2>
+            <span id="machState" class="pill off" data-i18n="machine.disconnected">getrennt</span>
+          </div>
+          <div class="mach-conn">
+            <select id="mProfiles" data-i18n-title="conn.profiles" title="Gespeicherte Verbindungen"><option value="" data-i18n="conn.profiles">Gespeicherte Verbindungen…</option></select>
+            <button id="mSaveConn" class="btn small ghost" data-i18n="conn.save" data-i18n-title="conn.saveTitle" title="Aktuelle IP/Port speichern">Speichern</button>
+            <button id="mDelConn" class="btn small ghost" data-i18n="conn.delete" data-i18n-title="conn.deleteTitle" title="Ausgewählte Verbindung löschen">Löschen</button>
+          </div>
+          <div class="mach-conn">
+            <button id="mDiscover" class="btn small" data-i18n="machine.discover">Suchen</button>
+            <input id="mIp" type="text" data-i18n-ph="machine.ipPh" placeholder="192.168.x.x" />
+            <input id="mPort" type="number" value="2222" class="port" />
+            <button id="mConnect" class="btn small" data-i18n="machine.connect">Verbinden</button>
+            <button id="mDisconnect" class="btn small ghost" disabled data-i18n="machine.disconnect">Trennen</button>
+          </div>
+          <div id="mFound" class="found"></div>
+          <div id="mStatus" class="mach-status hidden">
+            <div class="stat"><span data-i18n="stat.state">Status</span><b data-s="state">—</b></div>
+            <div class="stat"><span data-i18n="stat.wpos">WPos X/Y/Z</span><b data-s="wpos">—</b></div>
+            <div class="stat"><span data-i18n="stat.feed">Vorschub</span><b data-s="feed">—</b></div>
+            <div class="stat"><span data-i18n="stat.spin">Spindel</span><b data-s="spin">—</b></div>
+            <div class="stat"><span data-i18n="stat.tool">Werkzeug</span><b data-s="tool">—</b></div>
+          </div>
+          <div id="machDiag" class="mach-diag hidden"></div>
+          <div id="machAlarm" class="mach-alarm hidden"></div>
+
+          <div id="mProgress" class="mprogress hidden">
+            <div class="pbar"><div id="mProgressFill" class="pbar-fill"></div></div>
+            <div class="pmeta"><span id="mProgressPct">0 %</span><span id="mProgressTime">—</span></div>
+          </div>
+
+          <div class="dc-cols">
+            <div class="jog">
+              <div class="jog-head"><span data-i18n="jog.jog">Jog</span> <span class="muted" data-i18n="jog.step">Schritt</span>
+                <select id="jogStep"><option>0.1</option><option selected>1</option><option>10</option></select>
+                <span class="muted" data-i18n="jog.feed">F</span><input id="jogFeed" type="number" value="800" class="jogfeed" />
+              </div>
+              <div class="jog-pad">
+                <button class="jbtn" data-jog="Y" data-sign="1" style="grid-area:yp">Y+</button>
+                <button class="jbtn" data-jog="X" data-sign="-1" style="grid-area:xm">X−</button>
+                <button class="jbtn home" data-action="home" style="grid-area:home" title="Home">⌂</button>
+                <button class="jbtn" data-jog="X" data-sign="1" style="grid-area:xp">X+</button>
+                <button class="jbtn" data-jog="Y" data-sign="-1" style="grid-area:ym">Y−</button>
+                <button class="jbtn" data-jog="Z" data-sign="1" style="grid-area:zp">Z+</button>
+                <button class="jbtn" data-jog="Z" data-sign="-1" style="grid-area:zm">Z−</button>
+                <button class="jbtn" data-jog="A" data-sign="-1" style="grid-area:am">A−</button>
+                <button class="jbtn" data-jog="A" data-sign="1" style="grid-area:ap">A+</button>
+              </div>
+            </div>
+            <div class="dc-actions">
+              <button class="btn small ghost" data-action="unlock" data-i18n="dc.unlock">Entsperren ($X)</button>
+              <button class="btn small ghost" data-action="reset" data-i18n="dc.reset">Reset</button>
+              <button class="btn small ghost" data-action="setOriginXYZ" data-i18n="dc.setOriginXYZ">Nullpunkt setzen (XYZ)</button>
+              <button class="btn small ghost" data-action="setOriginXY" data-i18n="dc.setOriginXY">Nullpunkt XY</button>
+              <button class="btn small ghost" data-action="gotoClearance" data-i18n="dc.gotoClearance">→ Freifahren</button>
+              <button class="btn small ghost" data-action="gotoOrigin" data-i18n="dc.gotoOrigin">→ Nullpunkt</button>
+              <button class="btn small ghost" data-action="margin" data-i18n="dc.margin">Rand abfahren</button>
+              <button class="btn small ghost" data-action="probe" data-i18n="dc.probe">Z antasten</button>
+              <button class="btn small ghost" data-action="level" data-i18n="dc.level">Auto-Leveling</button>
+            </div>
+          </div>
+
+          <details class="dc-extra">
+            <summary data-i18n="dc.extra">Zubehör &amp; Werkzeugwechsel</summary>
+            <div class="dc-grid">
+              <div class="dc-group"><span data-i18n="dc.light">Licht</span>
+                <button class="btn small ghost" data-action="lightOn" data-i18n="dc.on">An</button>
+                <button class="btn small ghost" data-action="lightOff" data-i18n="dc.off">Aus</button></div>
+              <div class="dc-group"><span data-i18n="dc.vac">Absaugung (auto)</span>
+                <button class="btn small ghost" data-action="vacOn" data-i18n="dc.on">An</button>
+                <button class="btn small ghost" data-action="vacOff" data-i18n="dc.off">Aus</button></div>
+              <div class="dc-group"><span data-i18n="dc.air">Air Assist</span>
+                <button class="btn small ghost" data-action="airOn" data-i18n="dc.on">An</button>
+                <button class="btn small ghost" data-action="airOff" data-i18n="dc.off">Aus</button></div>
+              <div class="dc-group"><span data-i18n="dc.fan">Spindel-Lüfter</span>
+                <button class="btn small ghost" data-action="fanOn" data-i18n="dc.on">An</button>
+                <button class="btn small ghost" data-action="fanOff" data-i18n="dc.off">Aus</button></div>
+              <div class="dc-group"><span data-i18n="dc.beep">Piep (Air)</span>
+                <button class="btn small ghost" data-action="beepOn" data-i18n="dc.on">An</button>
+                <button class="btn small ghost" data-action="beepOff" data-i18n="dc.off">Aus</button></div>
+              <div class="dc-group"><span data-i18n="dc.collet">Spannzange</span>
+                <button class="btn small ghost" data-action="colletClose" title="M490.1" data-i18n="dc.close">Schließen</button>
+                <button class="btn small ghost" data-action="colletOpen" title="M490.2" data-i18n="dc.open">Öffnen</button></div>
+              <div class="dc-group"><span data-i18n="dc.tool">Werkzeug</span>
+                <button class="btn small ghost" data-action="calibrate" title="M491" data-i18n="dc.calibrate">Kalibrieren</button>
+                <button class="btn small ghost" data-action="readTemp" title="M105" data-i18n="dc.readTemp">Temp lesen</button></div>
+              <div class="dc-group"><span data-i18n="dc.heightmap">Höhenkarte</span>
+                <button class="btn small ghost" data-action="levelShow" title="M375.1" data-i18n="dc.show">Anzeigen</button>
+                <button class="btn small ghost" data-action="levelClear" title="M370" data-i18n="dc.clear">Löschen</button></div>
+            </div>
+          </details>
+
+          <div class="mdi-row">
+            <input id="mdiInput" type="text" data-i18n-ph="mdi.ph" placeholder="G-Code / Befehl (Enter)" />
+            <button id="mdiSend" class="btn small" data-i18n="mdi.send">Senden</button>
+          </div>
+          <div class="run-row">
+            <select id="runFile"></select>
+            <button id="mUpload" class="btn small" data-i18n="run.upload">Hochladen</button>
+            <button id="mRun" class="btn small danger" data-i18n="run.uploadStart">Hochladen &amp; Start</button>
+          </div>
+          <div class="run-row">
+            <button class="btn small" data-action="pause" data-i18n="run.pause">⏸ Pause</button>
+            <button class="btn small" data-action="resume" data-i18n="run.resume">▶ Fortsetzen</button>
+            <button class="btn small danger" data-action="stop" data-i18n="run.stop">■ Stop</button>
+          </div>
+          <pre id="mConsole" class="console"></pre>
+
+          <details id="troubleHelp" class="trouble">
+            <summary data-i18n="trouble.summary">Hilfe &amp; Fehlerbehebung</summary>
+            <div class="tb-body" data-i18n-html="trouble.body"></div>
+          </details>
+        </div>
+      </section>
+
+      <!-- 7 · FERTIGUNG (LIVE) -->
+      <section class="wf-panel" data-wf-panel="fab">
+        <div class="card">
+          <div class="preview-head">
+            <h2 data-i18n="fab.title">Fertigung · Live</h2>
+            <span id="fabStatus" class="pill off" data-i18n="fab.ready">bereit</span>
+          </div>
+          <div class="fab-top">
+            <div class="canvas-wrap fab-canvas-wrap">
+              <canvas id="fabCanvas" width="900" height="360"></canvas>
+              <div id="fabPlaceholder" class="placeholder" data-i18n="fab.placeholder">Board laden, um die Fertigung zu verfolgen.</div>
+            </div>
+            <div class="fab-live">
+              <div class="fab-big" id="fabStepName">—</div>
+              <div class="mprogress">
+                <div class="pbar"><div id="fabFill" class="pbar-fill"></div></div>
+                <div class="pmeta"><span id="fabPct">0 %</span><span id="fabTime">—</span></div>
+              </div>
+              <div class="fab-meta" id="fabMeta"></div>
+              <div class="demo-bar">
+                <button id="fabPlay" class="btn small" disabled data-i18n="fab.sim">▶ Ablauf simulieren</button>
+                <button id="fabStop" class="btn small ghost hidden" data-i18n="demo.stop">■ Stop</button>
+                <label class="demo-speed"><span data-i18n="demo.speed">Tempo</span> <input id="fabSpeed" type="range" min="1" max="100" value="45" /></label>
+              </div>
+            </div>
+          </div>
+          <h3 class="sub" data-i18n="fab.sub">Arbeitsschritte – Schritt für Schritt</h3>
+          <div id="fabSteps" class="fab-steps"><p class="muted" data-i18n="fab.stepsPlaceholder">Board laden – dann erscheinen hier alle Schritte mit Zeit, Werkzeugwechsel-Ansage und den Lack-/Trocken-Schritten.</p></div>
+          <details class="trouble" id="fabLogPanel">
+            <summary><span data-i18n="log.title">Prozess-Log</span> <button id="logClear" class="btn small ghost" data-i18n="log.clear" type="button">Leeren</button></summary>
+            <pre id="fabLog" class="console"></pre>
+          </details>
+        </div>
+      </section>
+
+      <!-- 8 · ERGEBNIS -->
+      <section class="wf-panel" data-wf-panel="result">
+        <div class="card">
+          <div class="tabs">
+            <button class="tab active" data-tab="checks" data-i18n="res.checks">Prüfung</button>
+            <button class="tab" data-tab="downloads" data-i18n="res.downloads">Downloads</button>
+            <button class="tab" data-tab="report" data-i18n="res.report">Fertigungsplan</button>
+          </div>
+          <div class="tab-body" data-body="checks"><p class="muted" data-i18n="res.noChecks">Noch keine Ergebnisse.</p></div>
+          <div class="tab-body hidden" data-body="downloads"><p class="muted" data-i18n="res.noFiles">Noch keine Dateien.</p></div>
+          <div class="tab-body hidden" data-body="report"><p class="muted" data-i18n="res.noReport">Noch kein Fertigungsplan.</p></div>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="view3d.bundle.js"></script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,306 @@
+// End-to-end pipeline: gerber/drill text + config -> G-code files, report,
+// checks and preview geometry.
+
+import { parseGerber, toFilledPolygons } from './gerber/parser.js';
+import { parseExcellon } from './excellon/parser.js';
+import { generateIsolation } from './cam/isolation.js';
+import { generateDrill } from './cam/drill.js';
+import { generateOutline } from './cam/outline.js';
+import { isolationGcode, drillGcode, outlineGcode, combinedGcode, laserGcode } from './cam/gcode.js';
+import { runChecks } from './cam/checks.js';
+import { buildReport } from './report.js';
+import { defaultConfig, mergeConfig, isolationToolWidth } from './config.js';
+import { boundingBox } from './geometry/clipper.js';
+
+export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
+  const cfg = mergeConfig(defaultConfig, config);
+  const warnings = [];
+
+  if (!copper) throw new Error('No copper layer (F.Cu) provided.');
+
+  const copperParsed = parseGerber(copper);
+  warnings.push(...copperParsed.warnings.map((w) => `[copper] ${w}`));
+  const copperPolys = toFilledPolygons(copperParsed);
+  if (!copperPolys.length) throw new Error('Copper layer produced no geometry — check the file.');
+
+  let silkPolys = [];
+  let silkStrokes = [];
+  if (silk) {
+    try {
+      const silkParsed = parseGerber(silk);
+      warnings.push(...silkParsed.warnings.map((w) => `[silk] ${w}`));
+      silkPolys = toFilledPolygons(silkParsed);
+      // Laser engraving follows the stroke centre lines (plus region outlines).
+      silkStrokes = silkParsed.strokes.map((s) => s.points);
+      for (const r of silkParsed.regions) silkStrokes.push([...r.ring, r.ring[0]]);
+    } catch (err) {
+      warnings.push(`[silk] ${err.message}`);
+    }
+  }
+
+  let outlineStrokes = [];
+  let edgeBounds = null;
+  if (edge) {
+    const edgeParsed = parseGerber(edge);
+    warnings.push(...edgeParsed.warnings.map((w) => `[edge] ${w}`));
+    outlineStrokes = edgeParsed.strokes;
+    // Bounds from edge strokes (their centre lines define the true board edge).
+    const pts = outlineStrokes.flatMap((s) => s.points);
+    if (pts.length) {
+      edgeBounds = boundingBox([pts]);
+    }
+  } else {
+    warnings.push('No Edge.Cuts layer provided — outline step skipped.');
+  }
+
+  const copperBounds = boundingBox(copperPolys);
+  const boardBounds = edgeBounds || copperBounds;
+  const origin = { x: boardBounds.minX, y: boardBounds.minY };
+  const board = {
+    width: boardBounds.maxX - boardBounds.minX,
+    height: boardBounds.maxY - boardBounds.minY,
+  };
+
+  const iso = generateIsolation(copperPolys, cfg.isolation);
+
+  let drillResult = { drills: [] };
+  let drillGen = { groups: [], warnings: [] };
+  if (drill) {
+    drillResult = parseExcellon(drill);
+    warnings.push(...drillResult.warnings.map((w) => `[drill] ${w}`));
+    drillGen = generateDrill(drillResult.drills, cfg);
+  } else {
+    warnings.push('No drill file provided — drilling step skipped.');
+  }
+
+  let outlineGen = { loops: [], warnings: [], cutterDiameter: cfg.outline.cutterDiameter };
+  if (outlineStrokes.length) {
+    outlineGen = generateOutline(outlineStrokes, cfg);
+    warnings.push(...outlineGen.warnings.map((w) => `[outline] ${w}`));
+  }
+
+  // Tool assignment + per-tool feeds/speeds. Each operation uses the assigned
+  // tool's feedXY/plungeFeed/rpm (and peck for drills) where provided; geometry
+  // stays driven by the config. This makes the tool library actually drive the job.
+  const assignment = config.toolAssignment || {};
+  const tools = new Map((config.tools || []).map((t) => [String(t.number), t]));
+  const toolForOp = (opId) => {
+    const num = assignment[opId];
+    return num != null ? tools.get(String(num)) : null;
+  };
+  const withTool = (section, opId) => {
+    const t = toolForOp(opId);
+    const c = structuredClone(cfg);
+    if (t) {
+      if (t.feedXY != null && c[section]) c[section].feedXY = t.feedXY;
+      if (t.plungeFeed != null && c[section]) c[section].plungeFeed = t.plungeFeed;
+      if (t.rpm != null && c[section]) c[section].rpm = t.rpm;
+      if (section === 'drill' && t.peck != null) c.drill.peck = t.peck;
+    }
+    return c;
+  };
+
+  // --- G-code files ---
+  const fileNames = { isolation: '1_isolation.nc', drill: {}, outline: null };
+  const files = {};
+  files[fileNames.isolation] = isolationGcode(iso, withTool('isolation', 'isolation'), origin);
+
+  let idx = 2;
+  const drillGroupsSorted = drillGen.groups.slice().sort((a, b) => a.bitDiameter - b.bitDiameter);
+  for (const g of drillGroupsSorted) {
+    const name = `${idx}_drill_${g.bitDiameter.toFixed(2)}mm.nc`;
+    fileNames.drill[g.tool] = name;
+    files[name] = drillGcode(g, withTool('drill', `drill:${g.bitDiameter.toFixed(2)}`), origin);
+    idx++;
+  }
+
+  if (outlineGen.loops.length) {
+    const name = `${idx}_outline.nc`;
+    fileNames.outline = name;
+    files[name] = outlineGcode(outlineGen, withTool('outline', 'outline'), origin);
+    idx++;
+  }
+
+  // Optional laser silkscreen engraving (separate program: laser mode drops
+  // the tool, so it is not part of the M6 combined job).
+  const laserOn = cfg.laser?.enable && silkStrokes.length > 0;
+  if (laserOn) {
+    const name = `${idx}_silkscreen_laser.nc`;
+    fileNames.laser = name;
+    files[name] = laserGcode(silkStrokes, cfg, origin);
+    idx++;
+  } else if (cfg.laser?.enable && !silkStrokes.length) {
+    warnings.push('Laser aktiviert, aber keine Silkscreen-Geometrie vorhanden.');
+  }
+
+  // Operations that need a tool assigned (drives the tool-library UI).
+  const operations = [
+    {
+      id: 'isolation',
+      title: 'Isolation',
+      toolType: cfg.isolation.tool === 'endmill' ? 'endmill' : 'vbit',
+      diameter: isolationToolWidth(cfg.isolation),
+      rpm: cfg.isolation.rpm,
+    },
+    ...drillGroupsSorted.map((g) => ({
+      id: `drill:${g.bitDiameter.toFixed(2)}`,
+      title: `Bohren ${g.bitDiameter.toFixed(2)} mm`,
+      toolType: 'drill',
+      diameter: g.bitDiameter,
+      rpm: cfg.drill.rpm,
+    })),
+  ];
+  if (outlineGen.loops.length) {
+    operations.push({
+      id: 'outline',
+      title: 'Außenkontur',
+      toolType: 'endmill',
+      diameter: cfg.outline.cutterDiameter,
+      rpm: cfg.outline.rpm,
+    });
+  }
+
+  // Combined single program with M6 tool changes (if the caller assigned tools).
+  const steps = [];
+  let combinedOk = operations.length > 0;
+  const resolveTool = (opId, rpm) => {
+    const t = toolForOp(opId);
+    if (!t) { combinedOk = false; return null; }
+    return { number: t.number, label: t.label || '', collet: t.collet, rpm: t.rpm || rpm };
+  };
+  {
+    const t = resolveTool('isolation', cfg.isolation.rpm);
+    if (t) steps.push({ kind: 'isolation', title: 'Isolation', iso, tool: t, cfg: withTool('isolation', 'isolation') });
+  }
+  for (const g of drillGroupsSorted) {
+    const opId = `drill:${g.bitDiameter.toFixed(2)}`;
+    const t = resolveTool(opId, cfg.drill.rpm);
+    if (t) steps.push({ kind: 'drill', title: `Bohren ${g.bitDiameter.toFixed(2)} mm`, group: g, tool: t, cfg: withTool('drill', opId) });
+  }
+  if (outlineGen.loops.length) {
+    const t = resolveTool('outline', cfg.outline.rpm);
+    if (t) steps.push({ kind: 'outline', title: 'Außenkontur', outline: outlineGen, tool: t, cfg: withTool('outline', 'outline') });
+  }
+  if (combinedOk && steps.length === operations.length) {
+    files['0_full_job.nc'] = combinedGcode(steps, cfg, origin, { useCollet: !!config.useCollet });
+    fileNames.combined = '0_full_job.nc';
+  }
+
+  // Rough machining-time estimates per operation (for the live fabrication view).
+  const times = estimateTimes({ iso, drillGroupsSorted, outlineGen, silkStrokes, laserOn, cfg, withTool });
+
+  const checks = runChecks({
+    copperPolys,
+    drill: drillGen,
+    outline: outlineGen,
+    cfg,
+    boardBounds,
+  });
+
+  const report = buildReport({
+    cfg,
+    board,
+    iso,
+    drill: drillGen,
+    outline: outlineGen,
+    checks,
+    files: fileNames,
+    warnings,
+    assignment,
+    tools,
+    toolForOp,
+    laserOn,
+    silkPresent: silkStrokes.length > 0,
+  });
+
+  const preview = buildPreview({
+    origin, board, copperPolys, silkPolys, iso, drillGen, outlineGen, cfg,
+    laserStrokes: laserOn ? silkStrokes : [],
+  });
+
+  return {
+    cfg,
+    board,
+    origin,
+    files,
+    fileNames,
+    report,
+    checks,
+    warnings,
+    operations,
+    times,
+    stats: {
+      isolationRings: iso.ringCount,
+      drillGroups: drillGen.groups.map((g) => ({ diameter: g.bitDiameter, holes: g.holes.length })),
+      minCopperGap: checks.minCopperGap,
+      totalSeconds: times.total,
+    },
+    preview,
+  };
+}
+
+// Rough time model: cutting distance / feed + per-feature plunge/travel overhead.
+function estimateTimes({ iso, drillGroupsSorted, outlineGen, silkStrokes, laserOn, cfg, withTool }) {
+  const segLen = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const ringLen = (r) => { let L = 0; for (let i = 1; i < r.length; i++) L += segLen(r[i - 1], r[i]); if (r.length > 1) L += segLen(r[r.length - 1], r[0]); return L; };
+  const byOp = {};
+
+  // isolation
+  {
+    const c = withTool('isolation', 'isolation').isolation;
+    let L = 0;
+    let rings = 0;
+    for (const pass of iso.passes) for (const r of pass.rings) { L += ringLen(r); rings++; }
+    byOp.isolation = (L / Math.max(1, c.feedXY)) * 60 + rings * 1.5;
+  }
+  // drilling
+  for (const g of drillGroupsSorted) {
+    const c = withTool('drill', `drill:${g.bitDiameter.toFixed(2)}`).drill;
+    const pecks = Math.max(1, Math.ceil(g.depth / Math.max(0.05, c.peck)));
+    const perHole = 2 + pecks * ((g.depth / Math.max(1, c.plungeFeed)) * 60);
+    byOp[`drill:${g.bitDiameter.toFixed(2)}`] = g.holes.length * perHole;
+  }
+  // outline
+  if (outlineGen.loops.length) {
+    const c = withTool('outline', 'outline').outline;
+    const passes = Math.max(1, Math.ceil((cfg.material.thickness + 0.2) / Math.max(0.05, c.depthPerPass)));
+    let L = 0;
+    for (const loop of outlineGen.loops) { for (let i = 1; i < loop.pts.length; i++) L += Math.hypot(loop.pts[i].x - loop.pts[i - 1].x, loop.pts[i].y - loop.pts[i - 1].y); }
+    byOp.outline = (L * passes / Math.max(1, c.feedXY)) * 60 + outlineGen.loops.length * passes * 2;
+  }
+  // laser
+  if (laserOn) {
+    let L = 0;
+    for (const line of silkStrokes) for (let i = 1; i < line.length; i++) L += segLen(line[i - 1], line[i]);
+    byOp.laser = (L * Math.max(1, cfg.laser.passes) / Math.max(1, cfg.laser.feedXY)) * 60;
+  }
+  const total = Object.values(byOp).reduce((a, b) => a + b, 0);
+  return { byOp, total };
+}
+
+function buildPreview({ origin, board, copperPolys, silkPolys, iso, drillGen, outlineGen, cfg, laserStrokes }) {
+  const tx = (x, y) => [round(x - origin.x), round(y - origin.y)];
+  const copper = copperPolys.map((ring) => ring.map(([x, y]) => tx(x, y)));
+  const silk = (silkPolys || []).map((ring) => ring.map(([x, y]) => tx(x, y)));
+  const laser = (laserStrokes || []).map((line) => line.map(([x, y]) => tx(x, y)));
+  const isolation = iso.passes.map((pass) => pass.rings.map((ring) => ring.map(([x, y]) => tx(x, y))));
+  const drills = [];
+  for (const g of drillGen.groups) {
+    for (const [x, y] of g.holes) {
+      const [px, py] = tx(x, y);
+      drills.push({ x: px, y: py, d: g.bitDiameter });
+    }
+  }
+  const outline = outlineGen.loops.map((loop) => ({
+    closed: loop.closed,
+    pts: loop.pts.map((p) => {
+      const [x, y] = tx(p.x, p.y);
+      return { x, y, tab: !!p.tab };
+    }),
+  }));
+  return { board, thickness: cfg.material.thickness, copper, silk, laser, isolation, drills, outline };
+}
+
+function round(v) {
+  return Math.round(v * 1000) / 1000;
+}

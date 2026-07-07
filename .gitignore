@@ -1,0 +1,8 @@
+node_modules/
+makera-out/
+out/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
