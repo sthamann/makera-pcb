@@ -70,8 +70,8 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
   // board coordinates with `p - origin`, so shifting the work origin by
   // -offset moves EVERY operation (isolation, clearing, drills, outline,
   // laser) to work (offset.x, offset.y) — the work origin itself stays at the
-  // blank corner (anchor 1 + X15/Y10). Geometry generation and the preview
-  // remain board-local and untouched.
+  // blank corner (anchor 1, no extra offset). Geometry generation and the
+  // preview remain board-local and untouched.
   const placement = {
     x: Math.max(0, Number(cfg.placement?.offsetX) || 0),
     y: Math.max(0, Number(cfg.placement?.offsetY) || 0),
@@ -217,7 +217,7 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
     operations.push({
       id: 'maskRemove',
       title: 'Lötstopplack von den Pads entfernen',
-      toolType: 'endmill',
+      toolType: 'vbit', // PCB pack: 30° engraving bit (tip size = diameter)
       diameter: SOLDER_MASK_REMOVER_DIAMETER,
       rpm: SOLDER_MASK_REMOVER_RPM,
       separate: true, // guided manual step — never part of 0_full_job.nc

@@ -222,6 +222,6 @@ test('pipeline individual files contain M6 and safe first Z', { skip: !haveGerbe
   assert.match(iso, /M6 T1/);
   assert.match(iso, /G0 Z12/);
   const outline = result.files[result.fileNames.outline];
-  assert.match(outline, /M6 T4/);
+  assert.match(outline, /M6 T5/);
   assert.match(outline, /Z-1\.1\b/, 'tab plateau at -1.1 mm');
 });

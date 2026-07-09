@@ -52,9 +52,9 @@ export function runChecks({ copperPolys, drill, outline, cfg, boardBounds }) {
     add('warn', `Copper forms a single connected island (${islands}); no isolation gap to measure. Check the layer selection.`);
   }
 
-  // Board vs. stock size (Makera anchor-1 placement: the X15/Y10 work offset
-  // skips the L-bracket arms, so the work origin sits AT the blank's corner)
-  // — SHARED logic with the material-tab preview (web/public/stock-fit.js).
+  // Board vs. stock size (Makera anchor-1 placement: the work origin sits AT
+  // anchor 1 = the blank's corner, verified on a real machine — no X15/Y10
+  // offset) — SHARED logic with the material-tab preview (stock-fit.js).
   if (boardBounds) {
     const w = boardBounds.maxX - boardBounds.minX;
     const h = boardBounds.maxY - boardBounds.minY;
@@ -72,7 +72,7 @@ export function runChecks({ copperPolys, drill, outline, cfg, boardBounds }) {
       if (fit.fits) {
         add(
           'ok',
-          `Board ${w.toFixed(1)} × ${h.toFixed(1)} mm passt auf den Rohling ${stock.sizeX} × ${stock.sizeY} mm (benötigt ${fit.requiredX.toFixed(1)} × ${fit.requiredY.toFixed(1)} mm: Board ab Rohling-Ecke = Anker 1 + X15/Y10${offStr}, inkl. ~${margin} mm Klemm-Rand rechts/oben).`,
+          `Board ${w.toFixed(1)} × ${h.toFixed(1)} mm passt auf den Rohling ${stock.sizeX} × ${stock.sizeY} mm (benötigt ${fit.requiredX.toFixed(1)} × ${fit.requiredY.toFixed(1)} mm: Board ab Rohling-Ecke = Anker 1${offStr}, inkl. ~${margin} mm Klemm-Rand rechts/oben).`,
         );
       } else {
         add(

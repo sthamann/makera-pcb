@@ -56,7 +56,10 @@ test('gotoWorkOriginCommands targets work X0/Y0 (not machine coordinates)', () =
 });
 
 test('anchor-1 origin: phase 1 is the firmware anchor move (M496.3) alone', () => {
-  assert.deepEqual(ANCHOR1_OFFSET, { x: 15, y: 10 });
+  // Verified on a real machine: the board corner sits ON anchor 1, so the work
+  // origin is set AT anchor 1 with NO extra offset (a former X15/Y10 shifted
+  // every job 15/10 onto the board).
+  assert.deepEqual(ANCHOR1_OFFSET, { x: 0, y: 0 });
   // NOTHING may follow M496.3 in the same batch: the firmware executes the
   // move deferred on its main loop, so any immediate follow-up motion races
   // it (the old G91 X15 Y10 tripped "Soft Endstop X was exceeded").
@@ -64,12 +67,13 @@ test('anchor-1 origin: phase 1 is the firmware anchor move (M496.3) alone', () =
 });
 
 test('anchor-1 origin: phase 2 sets the origin via G10 L20 without any motion', () => {
-  // "Current position (= anchor 1) is work X-15/Y-10" → WPos 0/0 lands at
-  // anchor 1 + X15/Y10. No G0/G91 involved, so no soft-endstop risk.
+  // "Current position (= anchor 1) is work 0/0" → WPos 0/0 lands ON anchor 1 =
+  // the blank/board corner. No G0/G91 involved, so no soft-endstop risk.
   assert.deepEqual(setOriginAtAnchorOffsetCommands(), [
     'G90',
-    'G10 L20 P0 X-15 Y-10',
+    'G10 L20 P0 X0 Y0',
   ]);
+  // Still parameterisable for a custom fixture offset.
   assert.deepEqual(setOriginAtAnchorOffsetCommands({ x: 20, y: 5 }), [
     'G90',
     'G10 L20 P0 X-20 Y-5',

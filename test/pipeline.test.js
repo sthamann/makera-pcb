@@ -223,9 +223,9 @@ test('stock fit check flags a board that is too large for the blank', { skip: !h
   assert.ok(tooSmall.checks.messages.some((m) => m.level === 'error' && /passt NICHT/i.test(m.text)));
 
   // The standard Makera 150×100 blank fits the 138.5 mm example board: the
-  // X15/Y10 anchor offset skips the L-bracket arms, so the board starts at
-  // the blank's corner (verified on the real machine — scan margin ran the
-  // full 138.5 mm span on this blank).
+  // work origin sits at anchor 1 = the blank's corner, so the board starts at
+  // the corner (verified on the real machine — scan margin ran the full
+  // 138.5 mm span on this blank).
   const makeraBlank = runPipeline({
     copper: read(files.copper), edge: read(files.edge), drill: read(files.drill),
     config: { stock: { sizeX: 150, sizeY: 100 } },

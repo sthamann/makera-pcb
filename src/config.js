@@ -11,7 +11,8 @@ import { VACUUM_LINGER_DEFAULT_S } from '../web/public/machine-commands.js';
 export { VACUUM_ON_COMMAND, VACUUM_OFF_COMMAND, VACUUM_LINGER_DEFAULT_S } from '../web/public/machine-commands.js';
 // Makera solder-mask removal bit (No.5, spring-loaded) — used for the
 // mask-removal tool-assignment row (guided manual step, no G-code).
-export const SOLDER_MASK_REMOVER_DIAMETER = 0.9;
+// PCB Fabrication Pack: Single Flute Engraving Bit 30° × 0.3 mm (tip size).
+export const SOLDER_MASK_REMOVER_DIAMETER = 0.3;
 export const SOLDER_MASK_REMOVER_RPM = 6000;
 // Nominal 5 W laser spot size for the silkscreen-engraving assignment row.
 export const LASER_SPOT_DIAMETER = 0.1;
@@ -20,11 +21,14 @@ export const CARVERA_SAFE_Z_DEFAULT = 12.0;
 // Short Z hop between nearby features on the same board (must stay below safeZ).
 export const CARVERA_TRAVEL_Z_DEFAULT = 2.0;
 // Fallback tool numbers when no tool-library assignment is present (Makera kit).
+// Fallback T# when no tool-library assignment (Makera PCB Fabrication Pack).
 export const DEFAULT_TOOL_NUMBER = {
   isolation: 1,
-  clearing: 3,
-  outline: 4,
-  drillBase: 2,
+  clearing: 4,
+  outline: 5,
+  drillBase: 6,
+  maskRemove: 2,
+  laser: 7,
 };
 
 export const defaultConfig = {
@@ -44,9 +48,9 @@ export const defaultConfig = {
   travelZ: CARVERA_TRAVEL_Z_DEFAULT, // low hop between nearby features on the board
 
   // Board placement on the blank (drag & drop in the Material tab): offset of
-  // the board's bottom-left corner from the work origin (= blank corner at
-  // anchor 1 + X15/Y10), in mm. The work origin itself NEVER moves — the
-  // offset shifts every operation in the generated G-code instead.
+  // the board's bottom-left corner from the work origin (= blank corner AT
+  // anchor 1), in mm. The work origin itself NEVER moves — the offset shifts
+  // every operation in the generated G-code instead.
   placement: {
     offsetX: 0,
     offsetY: 0,
@@ -67,7 +71,7 @@ export const defaultConfig = {
   isolation: {
     tool: 'vbit', // 'vbit' | 'endmill'
     vbitAngleDeg: 30, // full included angle
-    tipWidth: 0.1, // mm flat at the very tip
+    tipWidth: 0.2, // mm flat at the very tip (PCB pack: V-Bit 30° 0.2 mm)
     endmillDiameter: 0.2, // used when tool === 'endmill'
     cutDepth: 0.15, // mm into copper/FR4
     passes: 2, // number of concentric isolation passes
@@ -89,7 +93,7 @@ export const defaultConfig = {
   },
 
   outline: {
-    cutterDiameter: 1.0, // flat end mill for the board profile
+    cutterDiameter: 2.0, // PCB pack: Spiral-O Single Flute 2 mm
     depthPerPass: 0.4, // mm per pass
     throughMargin: 0.2, // extra depth below material bottom on the final pass
     feedXY: 250, // mm/min
@@ -107,7 +111,7 @@ export const defaultConfig = {
   // using a flat endmill / corn bit with a concentric-offset pocket fill.
   clearing: {
     enable: false, // opt-in, like laser/solderMask
-    toolDiameter: 1.0, // mm flat endmill / corn bit
+    toolDiameter: 2.0, // PCB pack: TiN Corn Bit 2 mm
     stepoverFrac: 0.4, // fraction of tool diameter overlapped between passes
     cutDepth: 0.12, // mm into copper/FR4 (copper is ~0.035 mm)
     margin: 0.4, // keep this far inside the board edge (don't touch the outline)

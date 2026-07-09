@@ -8,41 +8,43 @@
 // Real geometry of the Makera PCB workflow (verified against the official
 // firmware, the community controller and a real machine run):
 //
-//   * anchor 1 is the corner point where the L-bracket is bolted to the bed.
-//     The bracket ARMS extend INTO the work area from that point (firmware
-//     config: coordinate.anchor_width 15.0 / anchor_length 100.0,
-//     MakeraInc/CarveraFirmware src/config2.default; drawn the same way by
-//     carvera-community/carvera_controller main.py draw()).
-//   * The blank rests flush AGAINST those arms — its bottom-left corner
-//     therefore sits at anchor 1 + (arm width), NOT at the anchor point.
-//   * The official Makera PCB workflow places the work origin at anchor 1 +
-//     X15/Y10 (wiki.makera.com PCB tutorial). That offset exists to skip the
-//     bracket arms: the work origin lands ON the blank's corner, so the board
-//     effectively starts at the blank's bottom-left corner.
+//   * anchor 1 is the reference corner the blank is pushed against. On a real
+//     Carvera the blank's bottom-left corner lands directly ON anchor 1, so the
+//     work origin must be set AT anchor 1 (CARVERA_ANCHOR_OFFSET = 0/0). The
+//     L-bracket arms (coordinate.anchor_width/anchor_length) are only DRAWN as
+//     a visual cue; they no longer offset the coordinate origin.
+//   * An earlier version set the origin at anchor 1 + X15/Y10 (from a Makera
+//     wiki note). On the real machine that shifted EVERY operation 15 mm/10 mm
+//     onto the board: "Rand abfahren" started ~1.5 cm right / ~1.0 cm up of the
+//     board corner and ran over the edge, even with the placement offset at 0.
+//     Root cause: the board corner already sits at anchor 1, so the +15/10 was
+//     added on top instead of "skipping bracket arms".
+//   * The board therefore starts flush at the blank's bottom-left corner
+//     (BOARD_INSET_ON_STOCK = 0/0); the placement offset (drag & drop) is the
+//     only thing that moves it from there.
 //
-//   Cross-check against a real run: a 138.5 mm wide board on the 150 mm wide
-//   Makera blank scanned its full margin (MPos X-280.31 … X-141.81) without
-//   leaving the blank — impossible under the old "origin is 15 mm inside the
-//   blank" model (15 + 138.5 + 4 = 157.5 > 150), consistent with this one
-//   (0 + 138.5 + 4 = 142.5 ≤ 150).
+//   Cross-check against a real run: a 138.5 mm wide board fits the 150 mm wide
+//   Makera blank (138.5 + 4 clamp margin = 142.5 ≤ 150) and scans its full
+//   margin from the blank corner without leaving the blank.
 
-// Makera work offset of the PCB work origin from anchor 1 (bracket corner).
-export const CARVERA_ANCHOR_OFFSET = { x: 15, y: 10 };
+// Work offset of the PCB work origin from anchor 1. VERIFIED ON A REAL MACHINE
+// to be ZERO: the blank's bottom-left corner sits directly ON anchor 1, so the
+// work origin must be set AT anchor 1 (no extra offset). An earlier X15/Y10
+// value (from a Makera wiki note) shifted EVERY job 15 mm/10 mm onto the board
+// — the tool started ~1.5 cm right / ~1.0 cm up of the board corner and ran
+// over the edge (confirmed: with the origin at anchor 1 + X15/Y10, MPos of the
+// job start was 15/10 past the measured board corner = anchor 1). Kept at 0/0.
+export const CARVERA_ANCHOR_OFFSET = { x: 0, y: 0 };
 
-// L-bracket arm widths the anchor offset skips: the vertical arm (along Y) is
-// 15 mm wide in X, the horizontal arm (along X) ~10 mm in Y. The blank's
-// corner sits at anchor 1 + these arms.
+// Visual only: dimensions of the L-bracket the blank rests against, used to
+// draw the anchor in the material preview. NOT part of the coordinate model —
+// the work origin sits at the blank corner (CARVERA_ANCHOR_OFFSET = 0/0).
 export const BRACKET_ARM_MM = { x: 15, y: 10 };
-
-// Visual length of the bracket arms (firmware coordinate.anchor_length).
 export const BRACKET_ARM_LENGTH_MM = 100;
 
-// Where the board's bottom-left corner lands ON the blank: work origin minus
-// blank corner. With the Makera offsets this is (0,0) — flush at the corner.
-export const BOARD_INSET_ON_STOCK = {
-  x: CARVERA_ANCHOR_OFFSET.x - BRACKET_ARM_MM.x,
-  y: CARVERA_ANCHOR_OFFSET.y - BRACKET_ARM_MM.y,
-};
+// Where the board's bottom-left corner lands ON the blank, relative to the work
+// origin. The origin sits at the blank corner, so the board starts flush there.
+export const BOARD_INSET_ON_STOCK = { x: 0, y: 0 };
 
 // Minimum free stock beyond the board edge (right/top) for top clamps / handling.
 export const STOCK_CLAMP_MARGIN_MM = 4;

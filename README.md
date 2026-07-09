@@ -73,7 +73,9 @@ Drill (.drl)  ─┘                    0_full_job.nc (M6) · FAB-PLAN.md
 In **“3 · Tools (Carvera Air)”** define your tools (number, type, Ø, collet S1–S6,
 **feed/plunge/RPM**, label — stored in the browser).
 
-- **Load defaults** fills the complete Carvera Air toolkit.
+- **Load PCB pack** fills the **Makera PCB Fabrication Pack** tool list
+  (V-bit 0.2 mm, engraving 0.3/0.5 mm, 2 mm corn bit, 2 mm spiral-O, 2 mm drill, laser)
+  including default step assignments and 2 mm clearing/outline diameters.
 - **Makera PCB feeds** sets feed/plunge/RPM of every tool to the official Makera
   speeds & feeds table (PCB column): V-bit 12000/500/200, corn bit 12000/500/300,
   drill 10000/1000/200, solder-mask remover 6000/400/200.
@@ -103,8 +105,8 @@ and “custom”. The choice sets thickness (Z) and stock size (X/Y, with ⇄ sw
 preview** shows the blank resting against the L-bracket arms with the board where it
 really ends up and whether it **fits**. Preview, feasibility check and report share
 **one** fit rule (`web/public/stock-fit.js`) built on the verified anchor geometry:
-the Makera X15/Y10 work offset skips the L-bracket **arms** (firmware
-`coordinate.anchor_width`), so the board starts **at the blank’s corner** —
+the work origin sits **exactly at anchor 1 = the blank’s corner** (confirmed on a
+real machine — no X15/Y10 offset), so the board starts **at the blank’s corner** —
 board + ~4 mm clamping margin right/top must fit the blank, rotation counts.
 If the board does not fit, the Material tab shows a **red warning** with the
 required size and the smallest Makera blank that would fit.
@@ -113,10 +115,10 @@ required size and the smallest Makera blank that would fit.
 and drag it across the blank — e.g. away from the very corner for extra safety
 margin. It snaps to a **0.5 mm grid**, is clamped to the blank (incl. clamping
 margin, red warning when it would not fit), and the numeric **Offset X/Y** fields
-stay in sync (plus a reset button). The **work origin stays at anchor 1 + X15/Y10**;
-instead, every generated program (isolation, clearing, drilling, outline, laser)
-is shifted by the offset, and scan margin / Z-probe / auto-leveling run on the
-displaced board area. The offset is saved with the project.
+stay in sync (plus a reset button). The **work origin stays at anchor 1 (= the
+blank corner)**; instead, every generated program (isolation, clearing, drilling,
+outline, laser) is shifted by the offset, and scan margin / Z-probe / auto-leveling
+run on the displaced board area. The offset is saved with the project.
 
 <br clear="all" />
 
@@ -128,7 +130,7 @@ The **Fabrication** tab holds your hand through the real build, in the exact Mak
 (**wired probe first — margin/Z/leveling — then the cutting tool**):
 
 1. **Fix the board flat** at anchor 1 (with a to-scale top view + side-view layer stack).
-2. **Set XY origin** (Makera offset X15/Y10 from anchor 1).
+2. **Set XY origin** (exactly at anchor 1 = the board corner).
 3. **Insert & measure the wired probe (T0)** — a real `M6 T0` (tool-change overlay),
    then the firmware measures the probe on the length sensor. That measurement is
    the reference all later tool lengths are computed against.
@@ -174,7 +176,7 @@ project with live state detection: 1 connect → 2 homing/alarm (with an
 button and one sentence.
 
 **Device control** (grouped into *Set up*, *Move* and *Alarm & reset*): jog pad
-(X/Y/Z/A), home/unlock/reset; **“Origin = anchor 1 (X15/Y10)”** — one click that is
+(X/Y/Z/A), home/unlock/reset; **“Origin = anchor 1”** — one click that is
 fault-tolerant by design: it checks the machine state first (alarm/homing/busy are
 refused with a clear message), sends `M496.3` (the firmware itself raises Z and
 rapids to the anchor), **waits until the machine is idle again** — `M496.x` moves
@@ -280,7 +282,7 @@ Output lands in `out/` (`*.nc` + the fabrication plan).
 | General | `safeZ` / `travelZ` | 12 / 2 | cross-board rapid clearance (above clamps) / short hop between nearby features on the board |
 | Isolation | `isolation.tool` | `vbit` | `vbit` or `endmill` |
 | | `isolation.vbitAngleDeg` | 30 | V-bit included angle |
-| | `isolation.tipWidth` | 0.1 | tip width (mm) |
+| | `isolation.tipWidth` | 0.2 | tip width (mm, PCB pack V-bit 30° 0.2 mm) |
 | | `isolation.cutDepth` | 0.15 | cut depth into copper (mm) |
 | | `isolation.passes` | 2 | isolation passes |
 | | `isolation.overlap` | 0.4 | pass overlap (0–0.9) |
@@ -288,7 +290,7 @@ Output lands in `out/` (`*.nc` + the fabrication plan).
 | Drilling | `drill.throughMargin` | 0.3 | break-through margin (mm) |
 | | `drill.peck` | 0.6 | peck depth per bite (mm) |
 | | `drill.remap` | `[]` | remap bits, e.g. `[{ "from":1.3, "to":1.2 }]` |
-| Outline | `outline.cutterDiameter` | 1.0 | cutter Ø (mm) |
+| Outline | `outline.cutterDiameter` | 2.0 | cutter Ø (mm, PCB pack spiral-O 2 mm) |
 | | `outline.depthPerPass` | 0.4 | depth per pass (mm) |
 | | `outline.throughMargin` | 0.2 | break-through below material bottom on final pass (mm) |
 | | `outline.tabs` | 4 | number of holding tabs |
@@ -300,7 +302,7 @@ Output lands in `out/` (`*.nc` + the fabrication plan).
 | | `vacuum.pauseToolChange` | `false` | switch off while an `M6` waits for the tool |
 | | `vacuum.laser` | `true` | also run during the separate laser program |
 | Clearing | `clearing.enable` | `false` | mill away the background copper (opt-in) |
-| | `clearing.toolDiameter` | 1.0 | flat endmill / corn bit Ø (mm) |
+| | `clearing.toolDiameter` | 2.0 | flat endmill / corn bit Ø (mm, PCB pack) |
 | | `clearing.stepoverFrac` | 0.4 | pass overlap fraction (0–0.95) |
 | | `clearing.cutDepth` | 0.12 | cut depth into copper (mm) |
 | | `clearing.margin` | 0.4 | keep-out from the board edge (mm) |

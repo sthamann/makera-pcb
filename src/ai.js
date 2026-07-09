@@ -19,21 +19,21 @@ const KNOWLEDGE = `MACHINE — Makera Carvera Air (desktop 3-axis CNC):
 
 MAKERA TOOLKIT / PCB PACK + official PCB speeds&feeds (RPM / Feed mm/min /
 PlungeFeed / DepthOfCut):
-- V-Bit 1/8" 30°0.2 mm & 60°0.1 mm — isolation: 12000 rpm, feed 500, plunge 200,
-  DOC 0.1.
-- Corn bits (fishtail) 0.8–3.175 mm — area clearing / drilling / profile: 12000
-  rpm, feed 500, plunge 300, DOC 0.3.
-- PCB drill bits (0.8/1.0/1.2 mm …): 10000 rpm, feed 1000, plunge 200, DOC 1.
-- UV solder-mask removal bit (0.3 mm 30°): 6000 rpm, feed 400, plunge 200, DOC 0.2.
+- V-Bit 30° 0.2 mm (PCB pack) — isolation: 12000 rpm, feed 500, plunge 200, DOC 0.1.
+- Engraving 30° 0.3 / 0.5 mm (PCB pack) — UV solder-mask removal: 6000 rpm, feed 400, plunge 200, DOC 0.2.
+- Corn bit 2 mm (PCB pack) — copper clearing / area removal: 12000 rpm, feed 500, plunge 300, DOC 0.3.
+- Spiral-O single flute 2 mm (PCB pack) — board outline/profile: 12000 rpm, feed 500, plunge 300.
+- TiN drill 2 mm (PCB pack): 10000 rpm, feed 1000, plunge 200, DOC 1. (Other hole Ø need extra bits or drill.remap.)
 - Laser PCB silk on soldermask: ~100 mm/min, power ~20% (light) / 30% (dark), 1 pass.
 - PCB pack: copper-clad FR4 blanks (Makera blanks 1.5 mm; generic 1.6 mm; 1 oz =
   35 µm copper), UV-curable solder mask paint + roller + UV lamp, sanding block,
   alcohol wipes.
 
 PCB WORKFLOW (Makera LED example): fixate PCB+wasteboard flat at anchor 1, set
-work offset (e.g. X15/Y10), enable Scan Margin + Auto-Leveling (5×5 grid, height
-2 mm) using the wired probe, then run isolation → area cleaning → drilling →
-contour; the combined .nc auto-changes tools (wired probe, then bits).
+the work origin at anchor 1 (= the board corner), enable Scan Margin + Auto-
+Leveling (5×5 grid, height 2 mm) using the wired probe, then run isolation →
+area cleaning → drilling → contour; the combined .nc auto-changes tools (wired
+probe, then bits).
 
 PCB ISOLATION MILLING LOGIC:
 - Isolation removes a thin channel AROUND conductors. The isolation tool's

@@ -103,6 +103,9 @@ input[type="number"], select {
   border-radius: 7px; padding: 6px 8px; font-size: 13px; width: 100%;
 }
 input:focus, select:focus { outline: none; border-color: var(--accent); }
+/* "Zurücksetzen" gets its own right-aligned row so the Versatz Y input keeps
+   the full field width (was squished next to the button in the 110px column). */
+.place-reset-row { display: flex; justify-content: flex-end; margin: 2px 0 0; }
 
 .btn {
   border: 1px solid var(--line); background: #1c2536; color: var(--text);
@@ -176,7 +179,9 @@ canvas { display: block; width: 100%; height: auto; }
 
 .report { white-space: pre-wrap; font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cdd6e0; max-height: 460px; overflow: auto; background: #0f1522; padding: 12px; border-radius: 8px; border: 1px solid var(--line); }
 
-.toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1c2536; border: 1px solid var(--line); padding: 10px 16px; border-radius: 9px; z-index: 10; }
+/* Above the fixed machine dock (.mach-dock z-index 50) so copy/save/etc.
+   confirmations are never hidden behind it. */
+.toast { position: fixed; bottom: 56px; left: 50%; transform: translateX(-50%); background: #1c2536; border: 1px solid var(--line); padding: 10px 16px; border-radius: 9px; z-index: 100; box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
 .toast.err { border-color: var(--err); }
 .hidden { display: none; }
 

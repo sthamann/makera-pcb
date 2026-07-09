@@ -91,7 +91,8 @@
             <fieldset>
               <legend data-i18n="mat.placeLegend">Platinen-Position auf dem Rohling</legend>
               <label><span data-i18n="mat.offsetX">Versatz X (mm)</span><input id="placeOffX" type="number" step="0.5" min="0" data-path="placement.offsetX" value="0" /></label>
-              <label><span data-i18n="mat.offsetY">Versatz Y (mm)</span><span style="display:flex;gap:4px"><input id="placeOffY" type="number" step="0.5" min="0" data-path="placement.offsetY" value="0" /><button id="placeReset" class="btn ghost small" data-i18n="mat.placeReset" data-i18n-title="mat.placeResetTitle" title="Auf Standardposition (Rohling-Ecke) zurücksetzen" type="button">Zurücksetzen</button></span></label>
+              <label><span data-i18n="mat.offsetY">Versatz Y (mm)</span><input id="placeOffY" type="number" step="0.5" min="0" data-path="placement.offsetY" value="0" /></label>
+              <div class="place-reset-row"><button id="placeReset" class="btn ghost small" data-i18n="mat.placeReset" data-i18n-title="mat.placeResetTitle" title="Auf Standardposition (Rohling-Ecke) zurücksetzen" type="button">Zurücksetzen</button></div>
               <p class="muted" style="margin:4px 0 0" data-i18n="mat.placeHint">Platine in der Vorschau greifen und verschieben (Raster 0,5 mm). Der Werkstück-Nullpunkt bleibt am Anker – der G-Code wird um den Versatz verschoben.</p>
             </fieldset>
             <div class="canvas-wrap mat-canvas-wrap">
@@ -112,7 +113,7 @@
               <legend data-i18n="iso.legend">Isolation</legend>
               <label><span data-i18n="iso.tool">Werkzeug</span><select data-path="isolation.tool"><option value="vbit" selected data-i18n="iso.vbit">V-Bit</option><option value="endmill" data-i18n="iso.endmill">Flachfräser</option></select></label>
               <label><span data-i18n="iso.angle">V-Bit Winkel (°)</span><input type="number" step="1" data-path="isolation.vbitAngleDeg" value="30" /></label>
-              <label><span data-i18n="iso.tip">Spitzenbreite (mm)</span><input type="number" step="0.01" data-path="isolation.tipWidth" value="0.1" /></label>
+              <label><span data-i18n="iso.tip">Spitzenbreite (mm)</span><input type="number" step="0.01" data-path="isolation.tipWidth" value="0.2" /></label>
               <label><span data-i18n="iso.endmillDia">Flachfräser Ø (mm)</span><input type="number" step="0.05" data-path="isolation.endmillDiameter" value="0.2" /></label>
               <label><span data-i18n="iso.cutDepth">Frästiefe (mm)</span><input type="number" step="0.01" data-path="isolation.cutDepth" value="0.15" /></label>
               <label><span data-i18n="iso.passes">Bahnen</span><input type="number" step="1" min="1" data-path="isolation.passes" value="2" /></label>
@@ -129,7 +130,7 @@
             </fieldset>
             <fieldset>
               <legend data-i18n="out.legend">Außenkontur</legend>
-              <label><span data-i18n="out.dia">Fräser Ø (mm)</span><input type="number" step="0.1" data-path="outline.cutterDiameter" value="1.0" /></label>
+              <label><span data-i18n="out.dia">Fräser Ø (mm)</span><input type="number" step="0.1" data-path="outline.cutterDiameter" value="2.0" /></label>
               <label><span data-i18n="out.depth">Tiefe/Bahn (mm)</span><input type="number" step="0.1" data-path="outline.depthPerPass" value="0.4" /></label>
               <label><span data-i18n="out.feed">Vorschub XY</span><input type="number" step="10" data-path="outline.feedXY" value="250" /></label>
               <label><span data-i18n="out.rpm">Drehzahl</span><input type="number" step="500" data-path="outline.rpm" value="12000" /></label>
@@ -141,7 +142,7 @@
             <fieldset>
               <legend data-i18n="clearing.legend">Kupfer-Clearing (Fläche räumen)</legend>
               <label><span data-i18n="clearing.enable">Aktivieren</span><input type="checkbox" data-path="clearing.enable" /></label>
-              <label><span data-i18n="clearing.tool">Fräser Ø (mm)</span><input type="number" step="0.1" min="0.2" data-path="clearing.toolDiameter" value="1.0" /></label>
+              <label><span data-i18n="clearing.tool">Fräser Ø (mm)</span><input type="number" step="0.1" min="0.2" data-path="clearing.toolDiameter" value="2.0" /></label>
               <label><span data-i18n="clearing.stepover">Überlappung</span><input type="number" step="0.05" min="0" max="0.95" data-path="clearing.stepoverFrac" value="0.4" /></label>
               <label><span data-i18n="clearing.cutDepth">Frästiefe (mm)</span><input type="number" step="0.01" data-path="clearing.cutDepth" value="0.12" /></label>
               <label><span data-i18n="clearing.margin">Randabstand (mm)</span><input type="number" step="0.1" data-path="clearing.margin" value="0.4" /></label>
@@ -224,7 +225,7 @@
           <div class="preview-head">
             <h2 data-i18n="tools.title">Werkzeuge (Carvera Air)</h2>
             <div style="display:flex;gap:6px">
-              <button id="loadStdTools" class="btn ghost small" data-i18n="tools.loadStd" data-i18n-title="tools.loadStdTitle" title="Standard-Carvera-Air-Werkzeuge laden">Standard laden</button>
+              <button id="loadStdTools" class="btn ghost small" data-i18n="tools.loadStd" data-i18n-title="tools.loadStdTitle" title="Werkzeuge aus dem Makera PCB-Fertigungspaket laden">PCB-Pack laden</button>
               <button id="makeraFeeds" class="btn ghost small" data-i18n="tools.makeraFeeds" data-i18n-title="tools.makeraFeedsTitle" title="Feeds/Speeds aller Werkzeuge aus der offiziellen Makera-PCB-Tabelle setzen">Makera-PCB Feeds</button>
               <button id="addTool" class="btn ghost small" data-i18n="tools.add">+ Werkzeug</button>
             </div>
@@ -368,10 +369,10 @@
               </div>
               <p class="muted jog-hint" data-i18n="jog.aHint">A = optionale 4. (Dreh-)Achse · Button gedrückt halten = kontinuierlich fahren, loslassen stoppt.</p>
             </div>
-            <p class="muted origin-hint" data-i18n-html="dc.originHint">Home/Referenz ist die Ecke <b>oben rechts</b> (Maschinen-Null) – dein Fräs-Nullpunkt entsteht erst durch „Nullpunkt setzen". Platine am L-Winkel (Anker 1)? → <b>„Nullpunkt = Anker 1 (X15/Y10)"</b> (ein Klick). Frei aufgelegt? → auf Ecke + Oberfläche joggen und <b>„Nullpunkt setzen (XYZ)"</b>.</p>
+            <p class="muted origin-hint" data-i18n-html="dc.originHint">Home/Referenz ist die Ecke <b>oben rechts</b> (Maschinen-Null) – dein Fräs-Nullpunkt entsteht erst durch „Nullpunkt setzen". Platine am L-Winkel (Anker 1)? → <b>„Nullpunkt = Anker 1"</b> (ein Klick, Nullpunkt genau auf die Platinen-Ecke). Frei aufgelegt? → auf Ecke + Oberfläche joggen und <b>„Nullpunkt setzen (XYZ)"</b>.</p>
             <div class="dc-actions">
               <div class="dc-grp-title" data-i18n="dcgrp.setup">Einrichten (Nullpunkt &amp; Z)</div>
-              <div class="act"><button class="btn small ghost" data-action="setOriginAnchor1" data-i18n="dc.setOriginAnchor1">Nullpunkt = Anker 1 (X15/Y10)</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginAnchor1">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="setOriginAnchor1" data-i18n="dc.setOriginAnchor1">Nullpunkt = Anker 1</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginAnchor1">?</span></div>
               <div class="act"><button class="btn small ghost" data-action="setOriginXYZ" data-i18n="dc.setOriginXYZ">Nullpunkt setzen (XYZ)</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginXYZ">?</span></div>
               <div class="act"><button class="btn small ghost" data-action="setOriginXY" data-i18n="dc.setOriginXY">Nullpunkt XY</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginXY">?</span></div>
               <div class="act"><button class="btn small ghost" data-action="probe" data-i18n="dc.probe">Z antasten</button><span class="help" tabindex="0" data-i18n-tip="help.probe">?</span></div>

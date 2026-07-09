@@ -22,9 +22,10 @@
 
 import { CARVERA_ANCHOR_OFFSET } from './stock-fit.js';
 
-// Makera work offset of the PCB blank from anchor 1 (L-bracket corner): the
-// official Makera PCB workflow places the work origin 15 mm in X and 10 mm in
-// Y from the anchor (see the Fabrication tab, step 2). Shared with the
+// Work offset of the PCB blank from anchor 1 (L-bracket corner). VERIFIED to
+// be 0/0 on a real machine: the blank's bottom-left corner sits directly on
+// anchor 1, so the work origin is set AT anchor 1 (no extra offset). A former
+// X15/Y10 value shifted every job 15 mm/10 mm onto the board. Shared with the
 // stock-fit check so placement and fit can never disagree.
 export const ANCHOR1_OFFSET = CARVERA_ANCHOR_OFFSET;
 
@@ -83,10 +84,12 @@ export function gotoWorkOriginCommands() {
 //            is exactly what used to trip "Soft Endstop X was exceeded" (a
 //            relative X+15 from the park corner exceeds the -1 mm soft-limit
 //            maximum).
-//   Phase 2: G10 L20 P0 X-15 Y-10 — pure WCS bookkeeping, NO motion: "the
-//            current position (= anchor 1) is work X-15/Y-10", which puts the
-//            work origin (WPos 0/0) exactly at anchor 1 + X15/Y10. Z is left
+//   Phase 2: G10 L20 P0 X0 Y0 — pure WCS bookkeeping, NO motion: "the current
+//            position (= anchor 1) is work 0/0", which puts the work origin
+//            (WPos 0/0) exactly ON anchor 1 = the blank/board corner. Z is left
 //            untouched — it is set by the Z-probe / Config & Run step.
+//            (ANCHOR1_OFFSET = 0/0; a former X15/Y10 shifted every job onto
+//            the board — see ANCHOR1_OFFSET above.)
 //
 // This matches how the community controller sets the work origin (G10 offsets,
 // never a relative jog) while reusing the firmware's own safe anchor move.

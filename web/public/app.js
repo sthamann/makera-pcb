@@ -96,21 +96,48 @@ function makeraPcbFeeds(t) {
   return out;
 }
 
-// Full standard Carvera Air toolkit (bits & materials that ship with the Air).
+// Makera PCB Fabrication Pack toolkit (bits that ship with the PCB kit).
 // Feeds/speeds are the official Makera PCB-table recommendations.
 const STANDARD_TOOLS = [
   { number: 1, type: 'vbit', diameter: 0.2, collet: 2, label: 'V-Bit 30° 0.2mm (Isolation)', feedXY: 500, plungeFeed: 200, rpm: 12000 },
-  { number: 2, type: 'vbit', diameter: 0.1, collet: 2, label: 'V-Bit 60° 0.1mm (fein)', feedXY: 500, plungeFeed: 200, rpm: 12000 },
-  { number: 3, type: 'drill', diameter: 0.8, collet: 2, label: 'PCB-Bohrer 0.8mm', feedXY: 1000, plungeFeed: 200, rpm: 10000, peck: 1.0 },
-  { number: 4, type: 'drill', diameter: 1.0, collet: 2, label: 'PCB-Bohrer 1.0mm', feedXY: 1000, plungeFeed: 200, rpm: 10000, peck: 1.0 },
-  { number: 5, type: 'drill', diameter: 1.2, collet: 2, label: 'PCB-Bohrer 1.2mm', feedXY: 1000, plungeFeed: 200, rpm: 10000, peck: 1.0 },
-  { number: 6, type: 'endmill', diameter: 0.8, collet: 2, label: 'Corn-Bit 0.8mm (Flächen/Bohren/Kontur)', feedXY: 500, plungeFeed: 300, rpm: 12000 },
-  { number: 7, type: 'endmill', diameter: 1.0, collet: 2, label: 'Einzahnfräser 1.0mm', feedXY: 500, plungeFeed: 300, rpm: 12000 },
-  { number: 8, type: 'endmill', diameter: 2.0, collet: 2, label: 'Einzahnfräser 2.0mm', feedXY: 500, plungeFeed: 300, rpm: 12000 },
-  { number: 9, type: 'endmill', diameter: 3.175, collet: 2, label: 'Corn-Bit 3.175mm (Kontur)', feedXY: 500, plungeFeed: 300, rpm: 12000 },
-  { number: 10, type: 'endmill', diameter: 0.9, collet: 2, label: 'Lötstopplack-Entferner (No.5)', feedXY: 400, plungeFeed: 200, rpm: 6000 },
-  { number: 11, type: 'laser', diameter: 0.1, collet: 2, label: 'Laser 5W (Silkscreen-Gravur)', feedXY: 100, plungeFeed: 0, rpm: 0 },
+  { number: 2, type: 'vbit', diameter: 0.3, collet: 2, label: 'Engraving 30° 0.3mm (Lötstopplack)', feedXY: 400, plungeFeed: 200, rpm: 6000 },
+  { number: 3, type: 'vbit', diameter: 0.5, collet: 2, label: 'Engraving 30° 0.5mm (Lötstopplack)', feedXY: 400, plungeFeed: 200, rpm: 6000 },
+  { number: 4, type: 'endmill', diameter: 2.0, collet: 2, label: 'Corn-Bit 2mm (Kupfer-Clearing)', feedXY: 500, plungeFeed: 300, rpm: 12000 },
+  { number: 5, type: 'endmill', diameter: 2.0, collet: 2, label: 'Spiral-O 2mm (Außenkontur)', feedXY: 500, plungeFeed: 300, rpm: 12000 },
+  { number: 6, type: 'drill', diameter: 2.0, collet: 2, label: 'TiN Bohrer 2mm', feedXY: 1000, plungeFeed: 200, rpm: 10000, peck: 1.0 },
+  { number: 7, type: 'laser', diameter: 0.1, collet: 2, label: 'Laser 5W (Silkscreen-Gravur)', feedXY: 100, plungeFeed: 0, rpm: 0 },
 ];
+
+// Default step → tool mapping for the PCB pack (both endmills are 2 mm — pick by role).
+const DEFAULT_PCB_ASSIGNMENT = {
+  isolation: 1,
+  clearing: 4,
+  outline: 5,
+  maskRemove: 2,
+  laser: 7,
+};
+
+// Prefer a tool whose label matches the operation when several share the same Ø.
+const OP_TOOL_PREFER = {
+  isolation: (t) => /isol|v-bit|vbit|0\.2/i.test(t.label || ''),
+  clearing: (t) => /corn|clearing|kupfer|fläche|flache/i.test(t.label || ''),
+  outline: (t) => /spiral|kontur|outline|profil|außen/i.test(t.label || ''),
+  maskRemove: (t) => /löt|mask|engrav|stopplack|0\.3/i.test(t.label || ''),
+};
+
+function pickToolForOp(op) {
+  const candidates = state.tools.filter((t) => t.type === op.toolType);
+  if (!candidates.length) return null;
+  const prefer = OP_TOOL_PREFER[op.id];
+  const pool = prefer && candidates.some(prefer) ? candidates.filter(prefer) : candidates;
+  let best = pool[0];
+  let bestD = Infinity;
+  for (const t of pool) {
+    const d = Math.abs(t.diameter - op.diameter);
+    if (d < bestD) { bestD = d; best = t; }
+  }
+  return best;
+}
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -423,10 +450,7 @@ function validateAssignments() {
     }
 
     if (typeOk) continue; // v-bit / end mill: any valid same-type tool is fine
-    // wrong type / missing → nearest tool of the correct type
-    const cands = state.tools.filter((x) => x.type === op.toolType);
-    let best = null, bestD = Infinity;
-    for (const x of cands) { const d = Math.abs(x.diameter - op.diameter); if (d < bestD) { bestD = d; best = x; } }
+    const best = pickToolForOp(op);
     if (best) { state.assignment[op.id] = best.number; changed = true; }
     else if (cur != null) { delete state.assignment[op.id]; changed = true; }
   }
@@ -468,10 +492,7 @@ function renderAssignments() {
 function autoAssign() {
   const ops = state.result?.operations || [];
   for (const op of ops) {
-    const candidates = state.tools.filter((t) => t.type === op.toolType);
-    let best = candidates[0];
-    let bestD = Infinity;
-    for (const t of candidates) { const d = Math.abs(t.diameter - op.diameter); if (d < bestD) { bestD = d; best = t; } }
+    const best = pickToolForOp(op);
     if (best) state.assignment[op.id] = best.number;
   }
   saveJSON('makera_assignment', state.assignment);
@@ -555,11 +576,11 @@ function fitScene(canvas, ext, maxH = 460, view = null) {
   };
 }
 
-// Board placement offset on the stock + scene extent (union). The Makera
-// X15/Y10 work offset skips the L-bracket arms, so the work origin — and the
-// board's DEFAULT bottom-left corner — lands AT the blank's corner (BOARD_
-// INSET_ON_STOCK, see stock-fit.js). The user's drag & drop placement offset
-// shifts the board from there; the fit check uses the same numbers.
+// Board placement offset on the stock + scene extent (union). The work origin
+// sits AT anchor 1 = the blank's corner, so the board's DEFAULT bottom-left
+// corner lands right there (BOARD_INSET_ON_STOCK = 0/0, see stock-fit.js). The
+// user's drag & drop placement offset shifts the board from there; the fit
+// check uses the same numbers.
 function boardOnStock(board, stock) {
   const place = placementOffset();
   const offX = BOARD_INSET_ON_STOCK.x + place.x;
@@ -598,11 +619,30 @@ function drawMaterialPreview() {
   const { ctx, X, Y } = v;
   if (stock) {
     const armLen = Math.min(BRACKET_ARM_LENGTH_MM, Math.min(stock.sizeX, stock.sizeY));
-    ctx.fillStyle = '#8a94a6';
+    // Makera anchor / L-bracket the blank rests against. Dimmed + outlined so
+    // it reads as a corner clamp (not a solid block) and labelled, so it is
+    // clear this is the reference hardware, not part of the board.
+    const armX = X(-BRACKET_ARM_MM.x);
+    ctx.fillStyle = 'rgba(138,148,166,0.28)';
+    ctx.strokeStyle = 'rgba(138,148,166,0.8)';
+    ctx.lineWidth = 1;
     // vertical arm (blank rests against its right edge at x = 0)
-    ctx.fillRect(X(-BRACKET_ARM_MM.x), Y(armLen - BRACKET_ARM_MM.y), BRACKET_ARM_MM.x * v.scale, armLen * v.scale);
+    ctx.fillRect(armX, Y(armLen - BRACKET_ARM_MM.y), BRACKET_ARM_MM.x * v.scale, armLen * v.scale);
+    ctx.strokeRect(armX, Y(armLen - BRACKET_ARM_MM.y), BRACKET_ARM_MM.x * v.scale, armLen * v.scale);
     // horizontal arm (blank rests on its top edge at y = 0)
-    ctx.fillRect(X(-BRACKET_ARM_MM.x), Y(0), (armLen + BRACKET_ARM_MM.x) * v.scale, BRACKET_ARM_MM.y * v.scale);
+    ctx.fillRect(armX, Y(0), (armLen + BRACKET_ARM_MM.x) * v.scale, BRACKET_ARM_MM.y * v.scale);
+    ctx.strokeRect(armX, Y(0), (armLen + BRACKET_ARM_MM.x) * v.scale, BRACKET_ARM_MM.y * v.scale);
+    // "Anker" label along the vertical arm
+    ctx.save();
+    ctx.translate(X(-BRACKET_ARM_MM.x / 2), Y(armLen / 2));
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillStyle = 'rgba(214,220,232,0.95)';
+    ctx.font = '10px system-ui, -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(t('mat.lblAnchor'), 0, 0);
+    ctx.restore();
+    // the blank
     ctx.fillStyle = 'rgba(189,160,106,0.9)';
     ctx.fillRect(X(0), Y(stock.sizeY), stock.sizeX * v.scale, stock.sizeY * v.scale);
     ctx.strokeStyle = '#7a6a45'; ctx.lineWidth = 1; ctx.strokeRect(X(0), Y(stock.sizeY), stock.sizeX * v.scale, stock.sizeY * v.scale);
@@ -627,9 +667,6 @@ function drawMaterialPreview() {
     // board outline (red when it leaves the blank / clamp margin)
     ctx.strokeStyle = fit.fits ? '#2ecc71' : '#ff5a5a'; ctx.lineWidth = 1.5;
     ctx.strokeRect(BX(0), BY(board.height), board.width * v.scale, board.height * v.scale);
-    // work origin marker: stays at the blank corner even when the board moves
-    ctx.strokeStyle = '#4c8dff'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(X(0), Y(0), 4, 0, 7); ctx.stroke();
     const offStr = (place.x || place.y)
       ? ` · ${t('mat.infoOffset')} <b>X ${place.x} / Y ${place.y} mm</b>`
       : '';
@@ -655,6 +692,33 @@ function drawMaterialPreview() {
     state._vMat = null;
     if (info) info.innerHTML = `${t('mat.infoStock')} <b>${stock.sizeX} × ${stock.sizeY} mm</b> ${t('mat.noBoard')}`;
     if (warn) { warn.classList.add('hidden'); warn.innerHTML = ''; }
+  }
+  // Work origin (0/0) marker at the blank corner — drawn last so it stays on
+  // top of the board/copper. When the board is placed away from the corner
+  // (placement offset ≠ 0) the marker turns RED and spells out the exact shift
+  // in mm, plus a dashed line to the board corner, so it is obvious the job
+  // will NOT start at the board's corner and the copper must be placed there.
+  if (stock) {
+    const place = placementOffset();
+    const shifted = place.x > 0 || place.y > 0;
+    const col = shifted ? '#ff5a5a' : '#4c8dff';
+    if (shifted && board) {
+      const { offX, offY } = boardOnStock(board, stock);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,90,90,0.9)';
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(offX), Y(offY)); ctx.stroke();
+      ctx.restore();
+    }
+    ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(X(0), Y(0), 4, 0, 7); ctx.stroke();
+    ctx.fillStyle = col;
+    ctx.font = '10px system-ui, -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    const label = shifted ? t('mat.originShift', { x: place.x, y: place.y }) : t('mat.lblOrigin');
+    ctx.fillText(label, X(0) + 7, Y(0) - 3);
   }
 }
 
@@ -934,7 +998,7 @@ function updateFabLive(s) {
   const fs = $('#fabStatus');
   if (fs) { fs.className = 'pill ' + (s.state === 'Run' ? 'run' : 'on'); fs.textContent = s.state || '—'; }
   if (state.fab.anim.playing || !fabTabActive()) return; // manual simulation owns the canvas
-  const active = state.fab.steps[firstUndoneIdx()];
+  const active = state.fab.steps[currentStepIdx()];
   const pct = (play && play.length >= 2) ? Math.max(0, Math.min(100, play[1])) : 0;
   if (s.state === 'Run' && active && active.kind === 'mill' && fabGeom(active) && pct > 0) drawFabReveal(active, pct / 100);
   else if (s.wpos && s.wpos.length >= 2) drawFab([s.wpos[0], s.wpos[1]]);
@@ -965,8 +1029,9 @@ function buildFabSteps() {
   // Preparation & safety, ordered like the Makera "Config and Run": wired probe
   // (margin/Z/leveling) first, cutting tool only afterwards.
   steps.push({ id: 'fixate', kind: 'manual', title: t('step.fixate.t'), instr: t('step.fixate.i') });
-  // Primary action = one-click anchor-1 origin (M496.3 + X15/Y10 + G10 L20),
-  // matching the diagram; freely-placed boards use jog + "set origin (XYZ)".
+  // Primary action = one-click anchor-1 origin (M496.3 + G10 L20 at anchor 1,
+  // no offset), matching the diagram; freely-placed boards use jog + "set
+  // origin (XYZ)".
   steps.push({ id: 'setOrigin', kind: 'setup', action: 'setOriginAnchor1', title: t('step.setOrigin.t'), instr: t('step.setOrigin.i') });
   steps.push({ id: 'insertProbe', kind: 'setup', action: 'probeIn', title: t('step.insertProbe.t'), instr: t('step.insertProbe.i') });
   steps.push({ id: 'autoSetup', kind: 'setup', action: 'autoSetup', title: t('step.autoSetup.t'), instr: t('step.autoSetup.i') });
@@ -1011,7 +1076,11 @@ function buildFabSteps() {
 const AIRW = 300, AIRH = 200, PX = 52, PY = 20;
 const asx = (mm) => PX + mm;
 const asy = (mm) => PY + (AIRH - mm);
-const WOFF = ANCHOR1_OFFSET; // Makera work offset from anchor 1 (X15/Y10)
+// Visual inset of the board on the bed diagram: it rests flush against the
+// L-bracket arms (BRACKET_ARM_MM). The work origin now sits AT the board corner
+// (anchor 1, ANCHOR1_OFFSET = 0/0), so origin = board corner = this inset —
+// there is NO separate work offset to draw anymore.
+const WOFF = BRACKET_ARM_MM;
 
 function figBoard() {
   const b = state.result?.board;
@@ -1028,9 +1097,9 @@ function bedBase(holes = true) {
     dots += `<circle cx="${asx(x)}" cy="${asy(y)}" r="1.5" fill="#3a465c"/>`;
   const bed = `<rect x="${asx(0)}" y="${asy(AIRH)}" width="${AIRW}" height="${AIRH}" rx="7" fill="#212a3b" stroke="#3d4a63"/>`;
   // L-bracket at anchor 1 (front-left) with REAL arm widths (firmware
-  // coordinate.anchor_width): 15 mm in X / 10 mm in Y, ~100 mm long — the
-  // board at the X15/Y10 offset sits exactly flush against these arms.
-  // Mounting pattern: 2 dowel pins (filled) + 3 M5 screws (rings).
+  // coordinate.anchor_width): 15 mm in X / 10 mm in Y, ~100 mm long — the board
+  // rests flush against these arms, and its corner (= work origin) sits at
+  // their inner edge. Mounting pattern: 2 dowel pins (filled) + 3 M5 screws.
   const armX = BRACKET_ARM_MM.x, armY = BRACKET_ARM_MM.y, armLen = BRACKET_ARM_LENGTH_MM;
   const lbracket =
     `<rect x="${asx(0)}" y="${asy(armLen)}" width="${armX}" height="${armLen}" fill="#8a94a6"/>` +
@@ -1103,16 +1172,6 @@ function clamps() {
   const b = boardRect();
   const clamp = (cx) => `<rect x="${cx - 9}" y="${b.y - 7}" width="18" height="15" rx="3" fill="#48566e" stroke="#5b6b88"/>`;
   return clamp(b.x + b.w * 0.34) + clamp(b.x + b.w * 0.7);
-}
-// Arrows anchor 1 → WORK ORIGIN (X15/Y10). The origin does NOT follow the
-// board placement offset — the board may sit further up/right, the zero stays.
-function offsetArrows() {
-  const ox = asx(WOFF.x), oy = asy(WOFF.y);
-  const ax = asx(0), ay = asy(0);
-  return `<line x1="${ax}" y1="${ay + 12}" x2="${ox}" y2="${ay + 12}" class="arr x"/>` +
-    `<text x="${(ax + ox) / 2}" y="${ay + 24}" class="lbl blue" text-anchor="middle">X ${WOFF.x}</text>` +
-    `<line x1="${ax - 12}" y1="${ay}" x2="${ax - 12}" y2="${oy}" class="arr y"/>` +
-    `<text x="${ax - 22}" y="${(ay + oy) / 2}" class="lbl blue" text-anchor="middle" transform="rotate(-90 ${ax - 22} ${(ay + oy) / 2})">Y ${WOFF.y}</text>`;
 }
 function originDot() {
   const cx = asx(WOFF.x), cy = asy(WOFF.y);
@@ -1189,7 +1248,7 @@ function stepDiagram(step) {
   if (id === 'insertTool') return spindleSide('vbit');
   if (id === 'insertProbe') return spindleSide('probe');
   if (id === 'setOrigin') {
-    const inner = bedBase() + boardRect().svg + offsetArrows() + originDot() +
+    const inner = bedBase() + boardRect().svg + originDot() +
       `<text x="${asx(WOFF.x) + 8}" y="${asy(WOFF.y) + 20}" class="lbl blue">${t('dg.origin')}</text>`;
     return svgWrap(inner);
   }
@@ -1268,6 +1327,19 @@ function stepDiagram(step) {
 
 function firstUndoneIdx() {
   return state.fab.steps.findIndex((s) => !state.fab.done[s.id]);
+}
+// The step the LIVE view (header, wizard, canvas, list highlight) should centre
+// on. While a job is actually running the machine is physically ON that step,
+// so it wins — even if that step was already ticked off (which is exactly why
+// the header used to jump one ahead to the "next undone" step during a run).
+// When nothing is running, fall back to the first not-yet-done step.
+function currentStepIdx() {
+  const job = state.fab.job;
+  if (job && job.stepId && job.monitor?.active) {
+    const i = state.fab.steps.findIndex((s) => s.id === job.stepId);
+    if (i >= 0) return i;
+  }
+  return firstUndoneIdx();
 }
 
 // ---------- external vacuum automation (app side) ----------
@@ -1412,7 +1484,7 @@ function renderFab() {
   if (!state.result) { host.innerHTML = `<p class="muted">${t('fab.loadFirst')}</p>`; return; }
   state.fab.steps = buildFabSteps();
   $('#fabPlaceholder')?.classList.add('hidden');
-  const activeIdx = firstUndoneIdx();
+  const activeIdx = currentStepIdx();
   const viewIdx = (state.fab.view != null && state.fab.view < state.fab.steps.length) ? state.fab.view : (activeIdx >= 0 ? activeIdx : 0);
   const doneLbl = t('fab.done');
   const job = state.fab.job;
@@ -1617,7 +1689,7 @@ function drawFab(marker) {
   ctx.beginPath();
   for (const ring of p.copper) { ring.forEach(([x, y], i) => (i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y)))); ctx.closePath(); }
   ctx.fillStyle = 'rgba(217,130,43,0.4)'; ctx.fill('evenodd');
-  const active = state.fab.steps[firstUndoneIdx()];
+  const active = state.fab.steps[currentStepIdx()];
   const strokeSet = (rings, color, closed, dim) => { ctx.strokeStyle = color; ctx.globalAlpha = dim ? 0.3 : 1; ctx.lineWidth = dim ? 0.8 : 1.4; for (const r of rings) { if (!r || r.length < 2) continue; ctx.beginPath(); r.forEach((pt, i) => { const x = pt.x ?? pt[0]; const y = pt.y ?? pt[1]; i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y)); }); if (closed) ctx.closePath(); ctx.stroke(); } ctx.globalAlpha = 1; };
   strokeSet(p.isolation.flat(), '#ff5a5a', true, !active || active.id !== 'isolation');
   if (p.clearing?.length) strokeSet(p.clearing, '#f0b429', true, !active || active.id !== 'clearing');
@@ -2457,7 +2529,7 @@ async function setOriginAnchor1Flow() {
       return;
     }
     // Pure WCS bookkeeping (no motion): current position (= anchor 1) becomes
-    // work X-15/Y-10 → the work origin sits at anchor 1 + X15/Y10.
+    // work 0/0 → the work origin sits exactly ON anchor 1 = the board corner.
     if (!(await machineCommands(setOriginAtAnchorOffsetCommands()))) return;
     toast(t('machine.originAnchorSet', { x: ANCHOR1_OFFSET.x, y: ANCHOR1_OFFSET.y }));
     logEvent('log.originAnchorSet', {});
@@ -2794,10 +2866,19 @@ function swapStock() {
   scheduleGenerate();
 }
 
+function applyPcbPackDefaults() {
+  setPath('isolation.tipWidth', 0.2);
+  setPath('outline.cutterDiameter', 2.0);
+  setPath('clearing.toolDiameter', 2.0);
+}
+
 // ---------- standard tools ----------
 function loadStandardTools() {
   state.tools = STANDARD_TOOLS.map((t) => ({ ...t }));
+  state.assignment = { ...DEFAULT_PCB_ASSIGNMENT };
   saveJSON('makera_tools', state.tools);
+  saveJSON('makera_assignment', state.assignment);
+  applyPcbPackDefaults();
   renderTools();
   renderAssignments();
   scheduleGenerate();
@@ -3284,7 +3365,7 @@ function projLoad(id) {
 function projNew() {
   if (hasWorkspace() && !confirm(t('proj.newConfirm'))) return;
   setCurrentProjectId('');
-  applyProject({ files: {}, form: {}, tools: STANDARD_TOOLS.map((x) => ({ ...x })), assignment: {}, matPreset: 'mk-ss-100x150', matSides: 'single' });
+  applyProject({ files: {}, form: {}, tools: STANDARD_TOOLS.map((x) => ({ ...x })), assignment: { ...DEFAULT_PCB_ASSIGNMENT }, matPreset: 'mk-ss-100x150', matSides: 'single' });
   renderProjects();
 }
 function projDelete() {

@@ -74,7 +74,9 @@ Drill (.drl)  ─┘                    0_full_job.nc (M6) · FERTIGUNGSPLAN.md
 Im Card **„3 · Werkzeuge (Carvera Air)“** legst du deine Tools an (Nummer, Typ, Ø, Collet
 S1–S6, **Feed/Plunge/RPM**, Bezeichnung – im Browser gespeichert).
 
-- **Standard laden** füllt die komplette Carvera-Air-Werkzeugliste.
+- **PCB-Pack laden** füllt die Werkzeugliste des **Makera PCB-Fertigungspakets**
+  (V-Bit 0,2 mm, Engraving 0,3/0,5 mm, Corn-Bit 2 mm, Spiral-O 2 mm, Bohrer 2 mm, Laser)
+  inkl. Standard-Zuordnung und Fräser-Ø (Clearing/Kontur 2 mm).
 - **Makera-PCB Feeds** setzt Feed/Plunge/RPM aller Werkzeuge exakt auf die offizielle
   Makera-Tabelle (PCB-Spalte): V-Bit 12000/500/200, Corn-Bit 12000/500/300,
   Bohrer 10000/1000/200, Lötstopplack-Entferner 6000/400/200.
@@ -104,9 +106,10 @@ und „Eigenes Material“. Die Auswahl setzt Dicke (Z) und Stock-Maße (X/Y, mi
 **Live-Vorschau** zeigt den Rohling an den Schenkeln des L-Winkels mit der Platine dort,
 wo sie real liegt, und ob sie **passt**. Vorschau, Fräsbarkeits-Check und Report nutzen
 **eine** gemeinsame Fit-Regel (`web/public/stock-fit.js`) auf Basis der verifizierten
-Anker-Geometrie: Der Makera-Offset X15/Y10 überspringt die **Schenkel** des L-Winkels
-(Firmware `coordinate.anchor_width`), das Board beginnt also **an der Rohling-Ecke** —
-Board + ~4 mm Klemm-Rand rechts/oben müssen auf den Rohling passen, Drehung zählt mit.
+Anker-Geometrie: Der Werkstück-Nullpunkt sitzt **genau auf Anker 1 = der Rohling-Ecke**
+(auf einer echten Maschine bestätigt – kein X15/Y10-Offset), das Board beginnt also
+**an der Rohling-Ecke** — Board + ~4 mm Klemm-Rand rechts/oben müssen auf den Rohling
+passen, Drehung zählt mit.
 Passt das Board nicht, zeigt der Material-Tab eine **rote Warnung** mit dem benötigten
 Maß und dem kleinsten passenden Makera-Rohling.
 
@@ -115,7 +118,7 @@ auf dem Rohling verschieben (Maus + Touch) – z. B. weg von der Ecke für mehr
 Sicherheitsabstand. Sie rastet auf einem **0,5-mm-Raster** ein, wird an den Rohling
 geklemmt (inkl. Klemm-Rand, rote Warnung bei Überstand), und die numerischen Felder
 **Versatz X/Y** bleiben synchron (plus „Zurücksetzen“-Button). Der
-**Werkstück-Nullpunkt bleibt an Anker 1 + X15/Y10** – stattdessen werden alle
+**Werkstück-Nullpunkt bleibt an Anker 1 (= Rohling-Ecke)** – stattdessen werden alle
 erzeugten Programme (Isolation, Clearing, Bohren, Kontur, Laser) um den Versatz
 verschoben, und Scan Margin / Z-Antasten / Auto-Leveling laufen auf der versetzten
 Board-Fläche. Der Versatz wird mit dem Projekt gespeichert.
@@ -130,7 +133,7 @@ Der **Fertigungs-Tab** nimmt dich beim echten Herstellen an die Hand – in exak
 Makera-Reihenfolge (**erst Wired Probe – Rand/Z/Leveling – dann das Schneidwerkzeug**):
 
 1. **Platine plan fixieren** an Ankerpunkt 1 (maßstabsgetreue Draufsicht + Seitenansicht des Aufbaus).
-2. **XY-Nullpunkt setzen** (Makera-Offset X15/Y10 ab Anker 1).
+2. **XY-Nullpunkt setzen** (genau auf Anker 1 = Platinen-Ecke).
 3. **Wired Probe (T0) einsetzen & messen** — ein echter `M6 T0` (Wechsel-Overlay),
    danach misst die Firmware den Probe am Längensensor. Diese Messung ist die
    Referenz, gegen die später alle Werkzeuglängen verrechnet werden.
@@ -177,7 +180,7 @@ neue Projekt: 1 Verbinden → 2 Referenzfahrt/Alarm (mit „Alarm quittieren“-
 6 Job starten. Jeder Schritt hat ein Status-Icon, EINEN Button und einen Satz Erklärung.
 
 **Gerätesteuerung** (gruppiert in *Einrichten*, *Fahren* und *Alarm & Reset*): Jog-Pad
-(X/Y/Z/A), Home/Entsperren/Reset; **„Nullpunkt = Anker 1 (X15/Y10)“** — ein Klick, bewusst
+(X/Y/Z/A), Home/Entsperren/Reset; **„Nullpunkt = Anker 1“** — ein Klick, bewusst
 fehlertolerant: erst Zustandsprüfung (Alarm/Referenzfahrt/laufende Bewegung werden mit
 Klartext-Meldung abgelehnt), dann `M496.3` (die Firmware hebt selbst Z an und fährt zum
 Anker), dann **warten bis die Maschine wieder Idle ist** — `M496.x` wird von der Firmware
@@ -284,7 +287,7 @@ Ergebnis liegt in `out/` (`*.nc` + `FERTIGUNGSPLAN.md`).
 | Allgemein | `safeZ` / `travelZ` | 12 / 2 | Querfahrt über Klemmen/Platine / kurzer Sprung zwischen nahen Features auf der Platine |
 | Isolation | `isolation.tool` | `vbit` | `vbit` oder `endmill` |
 | | `isolation.vbitAngleDeg` | 30 | V-Bit-Spitzenwinkel |
-| | `isolation.tipWidth` | 0.1 | Spitzenbreite (mm) |
+| | `isolation.tipWidth` | 0.2 | Spitzenbreite (mm, PCB-Pack V-Bit 30° 0,2 mm) |
 | | `isolation.cutDepth` | 0.15 | Frästiefe ins Kupfer (mm) |
 | | `isolation.passes` | 2 | Anzahl Isolationsbahnen |
 | | `isolation.overlap` | 0.4 | Überlappung der Bahnen (0–0.9) |
@@ -292,7 +295,7 @@ Ergebnis liegt in `out/` (`*.nc` + `FERTIGUNGSPLAN.md`).
 | Bohren | `drill.throughMargin` | 0.3 | Durchbruch-Zugabe (mm) |
 | | `drill.peck` | 0.6 | Peck-Tiefe pro Zustellung (mm) |
 | | `drill.remap` | `[]` | Bohrer umbelegen, z. B. `[{ "from":1.3, "to":1.2 }]` |
-| Kontur | `outline.cutterDiameter` | 1.0 | Fräser-Ø (mm) |
+| Kontur | `outline.cutterDiameter` | 2.0 | Fräser-Ø (mm, PCB-Pack Spiral-O 2 mm) |
 | | `outline.depthPerPass` | 0.4 | Tiefe pro Bahn (mm) |
 | | `outline.throughMargin` | 0.2 | Durchbruch unter Materialunterseite im letzten Pass (mm) |
 | | `outline.tabs` | 4 | Anzahl Haltestege |

@@ -13,12 +13,14 @@ import {
 } from '../web/public/stock-fit.js';
 
 test('shared constants match the verified Makera anchor geometry', () => {
-  // Work origin = anchor 1 + X15/Y10 (official Makera PCB workflow).
-  assert.deepEqual(CARVERA_ANCHOR_OFFSET, { x: 15, y: 10 });
-  // The offset exists to skip the L-bracket arms (firmware
-  // coordinate.anchor_width) — the blank corner sits at anchor + arms, so the
-  // board starts flush at the blank's corner.
+  // Verified on a real machine: the blank corner sits ON anchor 1, so the work
+  // origin is set AT anchor 1 with NO offset (a former X15/Y10 shifted every
+  // job 15/10 onto the board and over its edge).
+  assert.deepEqual(CARVERA_ANCHOR_OFFSET, { x: 0, y: 0 });
+  // BRACKET_ARM_MM is now VISUAL-only (drawing the anchor in the preview); it
+  // is no longer part of the coordinate model.
   assert.deepEqual(BRACKET_ARM_MM, { x: 15, y: 10 });
+  // Board starts flush at the blank corner (= work origin).
   assert.deepEqual(BOARD_INSET_ON_STOCK, { x: 0, y: 0 });
   assert.equal(STOCK_CLAMP_MARGIN_MM, 4);
 });

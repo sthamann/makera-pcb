@@ -57,7 +57,7 @@ export function buildReport({ cfg, board, iso, drill, outline, checks, files, wa
   p('## Vorbereitung');
   p('');
   p('1. Kupferplatine + **Opferplatte (MDF, 1–2 mm)** plan an die L-Ecke (**Ankerpunkt 1**) spannen (Doppelklebeband + Top-Klemmen, Rand für die Kontur frei lassen). Vorher Platine plandrücken.');
-  p('2. **Werkstück-Nullpunkt (XY)** setzen – Makera-Standard-Offset **X15/Y10 ab Ankerpunkt 1**.');
+  p('2. **Werkstück-Nullpunkt (XY)** setzen – genau auf **Ankerpunkt 1 (= Platinen-Ecke)**.');
   p('3. **Wired Probe (T0)** einsetzen (der Air fragt „Changing Tool: Probe").');
   p('4. **Config & Run** in einem Rutsch (wie im Makera-Dialog): **Scan Margin** + **Auto Z Probe** (Z0) + **Auto Leveling** (5×5, Höhe 2 mm) mit dem Wired Probe. Bei PCB Pflicht, sonst ungleiche Frästiefe.');
   p('5. **Erst danach** das Schneidwerkzeug einsetzen. Werkzeuglänge misst der Air bei jedem `M6` selbst – kein manuelles Z-Nachtasten pro Werkzeug.');
