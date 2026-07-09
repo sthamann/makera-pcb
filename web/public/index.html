@@ -24,6 +24,9 @@
           <option value="de">DE</option>
           <option value="en">EN</option>
         </select>
+        <a id="mobileLink" class="icon-link" href="/mobile" target="_blank" rel="noopener" title="Mobile Remote (http://<LAN-IP>:4321/mobile)" aria-label="Mobile Remote">
+          <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M5 1.5A1.5 1.5 0 0 1 6.5 0h3A1.5 1.5 0 0 1 11 1.5v13A1.5 1.5 0 0 1 9.5 16h-3A1.5 1.5 0 0 1 5 14.5v-13zm1.5-.5a.5.5 0 0 0-.5.5v13a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-13a.5.5 0 0 0-.5-.5h-3zM8 14a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5z"/></svg>
+        </a>
         <a id="ghLink" class="icon-link hidden" href="#" target="_blank" rel="noopener" title="GitHub" aria-label="GitHub">
           <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
         </a>
@@ -82,13 +85,20 @@
             </fieldset>
             <fieldset>
               <legend data-i18n="mat.generalLegend">Allgemein</legend>
-              <label><span data-i18n="mat.safeZ">Sicherheits-Z (mm)</span><input type="number" step="0.5" data-path="safeZ" value="5" /></label>
-              <label><span data-i18n="mat.travelZ">Reise-Z (mm)</span><input type="number" step="0.1" data-path="travelZ" value="1.5" /></label>
+              <label><span data-i18n="mat.safeZ">Sicherheits-Z (mm)</span><input type="number" step="0.5" data-path="safeZ" value="12" /></label>
+              <label><span data-i18n="mat.travelZ">Reise-Z (mm)</span><input type="number" step="0.1" data-path="travelZ" value="2" /></label>
+            </fieldset>
+            <fieldset>
+              <legend data-i18n="mat.placeLegend">Platinen-Position auf dem Rohling</legend>
+              <label><span data-i18n="mat.offsetX">Versatz X (mm)</span><input id="placeOffX" type="number" step="0.5" min="0" data-path="placement.offsetX" value="0" /></label>
+              <label><span data-i18n="mat.offsetY">Versatz Y (mm)</span><span style="display:flex;gap:4px"><input id="placeOffY" type="number" step="0.5" min="0" data-path="placement.offsetY" value="0" /><button id="placeReset" class="btn ghost small" data-i18n="mat.placeReset" data-i18n-title="mat.placeResetTitle" title="Auf Standardposition (Rohling-Ecke) zurücksetzen" type="button">Zurücksetzen</button></span></label>
+              <p class="muted" style="margin:4px 0 0" data-i18n="mat.placeHint">Platine in der Vorschau greifen und verschieben (Raster 0,5 mm). Der Werkstück-Nullpunkt bleibt am Anker – der G-Code wird um den Versatz verschoben.</p>
             </fieldset>
             <div class="canvas-wrap mat-canvas-wrap">
               <canvas id="matCanvas" width="600" height="360"></canvas>
             </div>
             <div id="matInfo" class="board-info"></div>
+            <div id="matWarn" class="mat-warn hidden"></div>
           </div>
         </div>
       </section>
@@ -127,6 +137,70 @@
               <label><span data-i18n="out.tabW">Steg-Breite (mm)</span><input type="number" step="0.5" data-path="outline.tabWidth" value="2" /></label>
               <label><span data-i18n="out.tabH">Steg-Höhe (mm)</span><input type="number" step="0.1" data-path="outline.tabHeight" value="0.4" /></label>
               <label><span data-i18n="out.side">Seite</span><select data-path="outline.offsetSide"><option value="outside" selected data-i18n="out.outside">außen</option><option value="on" data-i18n="out.on">auf Linie</option><option value="inside" data-i18n="out.inside">innen</option></select></label>
+            </fieldset>
+            <fieldset>
+              <legend data-i18n="clearing.legend">Kupfer-Clearing (Fläche räumen)</legend>
+              <label><span data-i18n="clearing.enable">Aktivieren</span><input type="checkbox" data-path="clearing.enable" /></label>
+              <label><span data-i18n="clearing.tool">Fräser Ø (mm)</span><input type="number" step="0.1" min="0.2" data-path="clearing.toolDiameter" value="1.0" /></label>
+              <label><span data-i18n="clearing.stepover">Überlappung</span><input type="number" step="0.05" min="0" max="0.95" data-path="clearing.stepoverFrac" value="0.4" /></label>
+              <label><span data-i18n="clearing.cutDepth">Frästiefe (mm)</span><input type="number" step="0.01" data-path="clearing.cutDepth" value="0.12" /></label>
+              <label><span data-i18n="clearing.margin">Randabstand (mm)</span><input type="number" step="0.1" data-path="clearing.margin" value="0.4" /></label>
+              <label><span data-i18n="clearing.feed">Vorschub XY</span><input type="number" step="50" data-path="clearing.feedXY" value="500" /></label>
+              <p class="muted" style="margin:4px 0 0" data-i18n="clearing.note">Räumt das restliche Kupfer zwischen den Leiterbahnen mit einem Flachfräser (Corn-Bit) – wie eine geätzte Platine. Braucht ein zugeordnetes Endmill-Werkzeug.</p>
+              <div class="clearing-compare">
+                <div class="cmp-title" data-i18n="clearing.cmpTitle">Unterschied: Isolation vs. Kupfer-Clearing</div>
+                <div class="cmp-grid">
+                  <figure>
+                    <svg class="cmp-svg" viewBox="0 0 130 84" role="img" aria-labelledby="cmpaTitle">
+                      <title id="cmpaTitle">Nur Isolation</title>
+                      <rect x="1.5" y="1.5" width="127" height="81" rx="7" fill="#c9781f" />
+                      <g fill="#e79a47" stroke="#0e1b27" stroke-width="2" stroke-linejoin="round">
+                        <rect x="16" y="15" width="84" height="6" rx="3" />
+                        <rect x="16" y="39" width="84" height="6" rx="3" />
+                        <rect x="16" y="63" width="84" height="6" rx="3" />
+                        <circle cx="18" cy="18" r="7" /><circle cx="18" cy="42" r="7" /><circle cx="18" cy="66" r="7" />
+                        <circle cx="100" cy="18" r="7" /><circle cx="100" cy="42" r="7" /><circle cx="100" cy="66" r="7" />
+                      </g>
+                      <g fill="#0b1119">
+                        <circle cx="18" cy="18" r="2.4" /><circle cx="18" cy="42" r="2.4" /><circle cx="18" cy="66" r="2.4" />
+                        <circle cx="100" cy="18" r="2.4" /><circle cx="100" cy="42" r="2.4" /><circle cx="100" cy="66" r="2.4" />
+                      </g>
+                      <rect x="1.5" y="1.5" width="127" height="81" rx="7" fill="none" stroke="#7a5a2a" stroke-width="1" />
+                    </svg>
+                    <figcaption><b data-i18n="clearing.cmpAName">Nur Isolation (aktueller Ansatz)</b><span data-i18n="clearing.cmpADesc">Fräst nur eine dünne Rille rund um jede Leiterbahn. Das restliche Kupfer bleibt als große Fläche stehen.</span></figcaption>
+                  </figure>
+                  <figure>
+                    <svg class="cmp-svg" viewBox="0 0 130 84" role="img" aria-labelledby="cmpbTitle">
+                      <title id="cmpbTitle">Mit Clearing</title>
+                      <defs>
+                        <pattern id="millHatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                          <line x1="0" y1="0" x2="0" y2="5" stroke="#0b1119" stroke-width="0.6" opacity="0.35" />
+                        </pattern>
+                      </defs>
+                      <rect x="1.5" y="1.5" width="127" height="81" rx="7" fill="#4c5a39" />
+                      <rect x="1.5" y="1.5" width="127" height="81" rx="7" fill="url(#millHatch)" />
+                      <g fill="#d9822b" stroke="#8a5f24" stroke-width="0.8" stroke-linejoin="round">
+                        <rect x="16" y="15" width="84" height="6" rx="3" />
+                        <rect x="16" y="39" width="84" height="6" rx="3" />
+                        <rect x="16" y="63" width="84" height="6" rx="3" />
+                        <circle cx="18" cy="18" r="7" /><circle cx="18" cy="42" r="7" /><circle cx="18" cy="66" r="7" />
+                        <circle cx="100" cy="18" r="7" /><circle cx="100" cy="42" r="7" /><circle cx="100" cy="66" r="7" />
+                      </g>
+                      <g fill="#0b1119">
+                        <circle cx="18" cy="18" r="2.4" /><circle cx="18" cy="42" r="2.4" /><circle cx="18" cy="66" r="2.4" />
+                        <circle cx="100" cy="18" r="2.4" /><circle cx="100" cy="42" r="2.4" /><circle cx="100" cy="66" r="2.4" />
+                      </g>
+                      <rect x="1.5" y="1.5" width="127" height="81" rx="7" fill="none" stroke="#2c3a24" stroke-width="1" />
+                    </svg>
+                    <figcaption><b data-i18n="clearing.cmpBName">Mit Kupfer-Clearing</b><span data-i18n="clearing.cmpBDesc">Fräst das gesamte Hintergrundkupfer weg – es bleiben nur die Leiterbahnen.</span></figcaption>
+                  </figure>
+                </div>
+                <div class="cmp-legend">
+                  <span><i style="background:#d9822b"></i><span data-i18n="clearing.legCopper">Kupfer bleibt</span></span>
+                  <span><i style="background:#4c5a39"></i><span data-i18n="clearing.legFr4">FR4 (geräumt)</span></span>
+                  <span><i style="background:#0e1b27;border:1px solid #43506a"></i><span data-i18n="clearing.legCut">Isolationsrille</span></span>
+                </div>
+              </div>
             </fieldset>
             <fieldset>
               <legend data-i18n="laser.legend">Laser (Silkscreen-Gravur)</legend>
@@ -175,19 +249,25 @@
         <div class="card">
           <div class="preview-head">
             <h2 data-i18n="preview.title">Vorschau</h2>
-            <div class="view-toggle">
-              <button class="vt active" data-view="2d">2D</button>
-              <button class="vt" data-view="3d">3D</button>
+            <div class="pv-tools">
+              <div class="view-toggle">
+                <button class="vt active" data-view="2d">2D</button>
+                <button class="vt" data-view="3d">3D</button>
+              </div>
+              <button id="pvFit" class="btn small ghost" data-i18n="preview.fit" data-i18n-title="preview.fitTitle" title="Ansicht einpassen">⤢ Einpassen</button>
+              <button id="pvMeasure" class="btn small ghost" data-i18n="preview.measure" data-i18n-title="preview.measureTitle" title="Abstand messen">📏 Messen</button>
             </div>
           </div>
           <div class="legend">
             <label class="chip cu"><input type="checkbox" data-layer="copper" checked /> <span data-i18n="layer.copper">Kupfer</span></label>
             <label class="chip silk"><input type="checkbox" data-layer="silk" checked /> <span data-i18n="layer.silk">Silk</span></label>
             <label class="chip iso"><input type="checkbox" data-layer="isolation" checked /> <span data-i18n="layer.isolation">Isolation</span></label>
+            <label class="chip clearing"><input type="checkbox" data-layer="clearing" checked /> <span data-i18n="layer.clearing">Clearing</span></label>
             <label class="chip drill"><input type="checkbox" data-layer="drills" checked /> <span data-i18n="layer.drills">Bohrungen</span></label>
             <label class="chip out"><input type="checkbox" data-layer="outline" checked /> <span data-i18n="layer.outline">Kontur</span></label>
             <label class="chip laser"><input type="checkbox" data-layer="laser" checked /> <span data-i18n="layer.laser">Laser</span></label>
             <label class="chip stock"><input type="checkbox" data-layer="stock" checked /> <span data-i18n="layer.stock">Rohling</span></label>
+            <span class="preview-hint muted" data-i18n="preview.hint">Mausrad = Zoom · ziehen = verschieben</span>
           </div>
           <div class="canvas-wrap">
             <canvas id="preview" width="900" height="360"></canvas>
@@ -231,6 +311,8 @@
             <h2 data-i18n="machine.title">Maschine · Carvera Air</h2>
             <span id="machState" class="pill off" data-i18n="machine.disconnected">getrennt</span>
           </div>
+          <div id="setupAssist" class="setup-assist"></div>
+          <div id="hmPanel" class="hm-panel hidden"></div>
           <div class="mach-conn">
             <select id="mProfiles" data-i18n-title="conn.profiles" title="Gespeicherte Verbindungen"><option value="" data-i18n="conn.profiles">Gespeicherte Verbindungen…</option></select>
             <span class="help" tabindex="0" data-i18n-tip="help.profiles">?</span>
@@ -248,11 +330,14 @@
           </div>
           <div id="mFound" class="found"></div>
           <div id="mStatus" class="mach-status hidden">
-            <div class="stat"><span data-i18n="stat.state">Status</span> <span class="help" tabindex="0" data-i18n-tip="help.state">?</span><b data-s="state">—</b></div>
-            <div class="stat"><span data-i18n="stat.wpos">WPos X/Y/Z</span> <span class="help" tabindex="0" data-i18n-tip="help.wpos">?</span><b data-s="wpos">—</b></div>
-            <div class="stat"><span data-i18n="stat.feed">Vorschub</span> <span class="help" tabindex="0" data-i18n-tip="help.feed">?</span><b data-s="feed">—</b></div>
-            <div class="stat"><span data-i18n="stat.spin">Spindel</span> <span class="help" tabindex="0" data-i18n-tip="help.spin">?</span><b data-s="spin">—</b></div>
-            <div class="stat"><span data-i18n="stat.tool">Werkzeug</span> <span class="help" tabindex="0" data-i18n-tip="help.tool">?</span><b data-s="tool">—</b></div>
+            <div class="stat"><span class="stat-l"><span data-i18n="stat.state">Status</span> <span class="help" tabindex="0" data-i18n-tip="help.state">?</span></span><b data-s="state">—</b></div>
+            <div class="stat"><span class="stat-l"><span data-i18n="stat.wpos">WPos (Werkstück)</span> <span class="help" tabindex="0" data-i18n-tip="help.wpos">?</span></span><b data-s="wpos">—</b></div>
+            <div class="stat"><span class="stat-l"><span data-i18n="stat.mpos">MPos (Maschine)</span> <span class="help" tabindex="0" data-i18n-tip="help.mpos">?</span></span><b data-s="mpos">—</b></div>
+            <div class="stat"><span class="stat-l"><span data-i18n="stat.origin">Werkstück-Nullpunkt</span> <span class="help" tabindex="0" data-i18n-tip="help.origin">?</span></span><b data-s="origin">—</b></div>
+            <div class="stat"><span class="stat-l"><span data-i18n="stat.feed">Vorschub</span> <span class="help" tabindex="0" data-i18n-tip="help.feed">?</span></span><b data-s="feed">—</b></div>
+            <div class="stat"><span class="stat-l"><span data-i18n="stat.spin">Spindel</span> <span class="help" tabindex="0" data-i18n-tip="help.spin">?</span></span><b data-s="spin">—</b></div>
+            <div class="stat"><span class="stat-l"><span data-i18n="stat.tool">Werkzeug</span> <span class="help" tabindex="0" data-i18n-tip="help.tool">?</span></span><b data-s="tool">—</b></div>
+            <div class="stat"><span class="stat-l"><span data-i18n="stat.leveling">Auto-Leveling</span> <span class="help" tabindex="0" data-i18n-tip="help.leveling">?</span></span><b data-s="leveling">—</b></div>
           </div>
           <div id="machDiag" class="mach-diag hidden"></div>
           <div id="machAlarm" class="mach-alarm hidden"></div>
@@ -273,7 +358,7 @@
               <div class="jog-pad">
                 <button class="jbtn" data-jog="Y" data-sign="1" style="grid-area:yp">Y+</button>
                 <button class="jbtn" data-jog="X" data-sign="-1" style="grid-area:xm">X−</button>
-                <button class="jbtn home" data-action="home" style="grid-area:home" title="Home">⌂</button>
+                <button class="jbtn home" data-action="home" data-i18n-title="jog.homeTitle" title="Home ($H) – Referenzfahrt zur Ecke oben rechts">⌂</button>
                 <button class="jbtn" data-jog="X" data-sign="1" style="grid-area:xp">X+</button>
                 <button class="jbtn" data-jog="Y" data-sign="-1" style="grid-area:ym">Y−</button>
                 <button class="jbtn" data-jog="Z" data-sign="1" style="grid-area:zp">Z+</button>
@@ -283,23 +368,28 @@
               </div>
               <p class="muted jog-hint" data-i18n="jog.aHint">A = optionale 4. (Dreh-)Achse · Button gedrückt halten = kontinuierlich fahren, loslassen stoppt.</p>
             </div>
+            <p class="muted origin-hint" data-i18n-html="dc.originHint">Home/Referenz ist die Ecke <b>oben rechts</b> (Maschinen-Null) – dein Fräs-Nullpunkt entsteht erst durch „Nullpunkt setzen". Platine am L-Winkel (Anker 1)? → <b>„Nullpunkt = Anker 1 (X15/Y10)"</b> (ein Klick). Frei aufgelegt? → auf Ecke + Oberfläche joggen und <b>„Nullpunkt setzen (XYZ)"</b>.</p>
             <div class="dc-actions">
-              <div class="act"><button class="btn small ghost" data-action="unlock" data-i18n="dc.unlock">Entsperren ($X)</button><span class="help" tabindex="0" data-i18n-tip="help.unlock">?</span></div>
-              <div class="act"><button class="btn small ghost" data-action="reset" data-i18n="dc.reset">Reset</button><span class="help" tabindex="0" data-i18n-tip="help.reset">?</span></div>
+              <div class="dc-grp-title" data-i18n="dcgrp.setup">Einrichten (Nullpunkt &amp; Z)</div>
+              <div class="act"><button class="btn small ghost" data-action="setOriginAnchor1" data-i18n="dc.setOriginAnchor1">Nullpunkt = Anker 1 (X15/Y10)</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginAnchor1">?</span></div>
               <div class="act"><button class="btn small ghost" data-action="setOriginXYZ" data-i18n="dc.setOriginXYZ">Nullpunkt setzen (XYZ)</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginXYZ">?</span></div>
               <div class="act"><button class="btn small ghost" data-action="setOriginXY" data-i18n="dc.setOriginXY">Nullpunkt XY</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginXY">?</span></div>
-              <div class="act"><button class="btn small ghost" data-action="gotoClearance" data-i18n="dc.gotoClearance">→ Freifahren</button><span class="help" tabindex="0" data-i18n-tip="help.gotoClearance">?</span></div>
-              <div class="act"><button class="btn small ghost" data-action="gotoOrigin" data-i18n="dc.gotoOrigin">→ Nullpunkt</button><span class="help" tabindex="0" data-i18n-tip="help.gotoOrigin">?</span></div>
-              <div class="act"><button class="btn small ghost" data-action="margin" data-i18n="dc.margin">Rand abfahren</button><span class="help" tabindex="0" data-i18n-tip="help.margin">?</span></div>
               <div class="act"><button class="btn small ghost" data-action="probe" data-i18n="dc.probe">Z antasten</button><span class="help" tabindex="0" data-i18n-tip="help.probe">?</span></div>
               <div class="act"><button class="btn small ghost" data-action="level" data-i18n="dc.level">Auto-Leveling</button><span class="help" tabindex="0" data-i18n-tip="help.level">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="margin" data-i18n="dc.margin">Rand abfahren</button><span class="help" tabindex="0" data-i18n-tip="help.margin">?</span></div>
+              <div class="dc-grp-title" data-i18n="dcgrp.move">Fahren</div>
+              <div class="act"><button class="btn small ghost" data-action="gotoOrigin" data-i18n="dc.gotoOrigin">→ Werkstück-Nullpunkt</button><span class="help" tabindex="0" data-i18n-tip="help.gotoOrigin">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="gotoClearance" data-i18n="dc.gotoClearance">→ Parkposition (oben rechts)</button><span class="help" tabindex="0" data-i18n-tip="help.gotoClearance">?</span></div>
               <div class="goto-bar">
-                <span class="muted" data-i18n="dc.gotoXY">Gehe zu</span>
+                <span class="muted" data-i18n="dc.gotoXY">Gehe zu (Werkstück-X/Y)</span>
                 <span class="help" tabindex="0" data-i18n-tip="help.gotoXY">?</span>
-                <label>X<input id="gotoX" type="number" step="0.1" value="15" /></label>
-                <label>Y<input id="gotoY" type="number" step="0.1" value="10" /></label>
-                <button class="btn small ghost" data-action="gotoXY" data-i18n="dc.gotoGo" data-i18n-title="dc.gotoXYTitle" title="Erst Freifahrhöhe (Z), dann X/Y im aktuellen Werk-Koordinatensystem anfahren.">Anfahren</button>
+                <label>X<input id="gotoX" type="number" step="0.1" value="0" /></label>
+                <label>Y<input id="gotoY" type="number" step="0.1" value="0" /></label>
+                <button class="btn small ghost" data-action="gotoXY" data-i18n="dc.gotoGo" data-i18n-title="dc.gotoXYTitle" title="Erst Freifahrhöhe (Z), dann X/Y im Werkstück-Koordinatensystem (ab deinem Nullpunkt) anfahren.">Anfahren</button>
               </div>
+              <div class="dc-grp-title" data-i18n="dcgrp.alarm">Alarm &amp; Reset</div>
+              <div class="act"><button class="btn small ghost" data-action="unlock" data-i18n="dc.unlock">Entsperren ($X)</button><span class="help" tabindex="0" data-i18n-tip="help.unlock">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="reset" data-i18n="dc.reset">Reset</button><span class="help" tabindex="0" data-i18n-tip="help.reset">?</span></div>
             </div>
           </div>
 
@@ -309,9 +399,10 @@
               <div class="dc-group"><span data-i18n="dc.light">Licht</span><span class="help" tabindex="0" data-i18n-tip="help.light">?</span>
                 <button class="btn small ghost" data-action="lightOn" data-i18n="dc.on">An</button>
                 <button class="btn small ghost" data-action="lightOff" data-i18n="dc.off">Aus</button></div>
-              <div class="dc-group"><span data-i18n="dc.vac">Absaugung (auto)</span><span class="help" tabindex="0" data-i18n-tip="help.vac">?</span>
-                <button class="btn small ghost" data-action="vacOn" data-i18n="dc.on">An</button>
-                <button class="btn small ghost" data-action="vacOff" data-i18n="dc.off">Aus</button></div>
+              <div class="dc-group"><span data-i18n="dc.vac">Absaugung (extern)</span><span class="help" tabindex="0" data-i18n-tip="help.vac">?</span>
+                <span id="vacState" class="vac-state off">—</span>
+                <button class="btn small ghost" data-action="vacOn" title="M851" data-i18n="dc.on">An</button>
+                <button class="btn small ghost" data-action="vacOff" title="M852" data-i18n="dc.off">Aus</button></div>
               <div class="dc-group"><span data-i18n="dc.air">Air Assist</span><span class="help" tabindex="0" data-i18n-tip="help.air">?</span>
                 <button class="btn small ghost" data-action="airOn" data-i18n="dc.on">An</button>
                 <button class="btn small ghost" data-action="airOff" data-i18n="dc.off">Aus</button></div>
@@ -324,13 +415,23 @@
               <div class="dc-group"><span data-i18n="dc.collet">Spannzange</span><span class="help" tabindex="0" data-i18n-tip="help.collet">?</span>
                 <button class="btn small ghost" data-action="colletClose" title="M490.1" data-i18n="dc.close">Schließen</button>
                 <button class="btn small ghost" data-action="colletOpen" title="M490.2" data-i18n="dc.open">Öffnen</button></div>
+              <div class="dc-group"><span data-i18n="dc.probeGrp">Taster</span><span class="help" tabindex="0" data-i18n-tip="help.probeGrp">?</span>
+                <button class="btn small ghost" data-action="probeIn" title="M6 T0 / M491" data-i18n="dc.probeIn">Probe (T0)</button>
+                <button class="btn small ghost" data-action="probeChange" title="M493.2 T0" data-i18n="dc.probeChange">Nur Nummer setzen</button></div>
               <div class="dc-group"><span data-i18n="dc.tool">Werkzeug</span><span class="help" tabindex="0" data-i18n-tip="help.toolgrp">?</span>
-                <button class="btn small ghost" data-action="probeIn" title="M6 T0" data-i18n="dc.probeIn">Probe (T0)</button>
                 <button class="btn small ghost" data-action="calibrate" title="M491" data-i18n="dc.calibrate">Kalibrieren</button>
                 <button class="btn small ghost" data-action="readTemp" title="M105" data-i18n="dc.readTemp">Temp lesen</button></div>
               <div class="dc-group"><span data-i18n="dc.heightmap">Höhenkarte</span><span class="help" tabindex="0" data-i18n-tip="help.heightmap">?</span>
                 <button class="btn small ghost" data-action="levelShow" title="M375.1" data-i18n="dc.show">Anzeigen</button>
                 <button class="btn small ghost" data-action="levelClear" title="M370" data-i18n="dc.clear">Löschen</button></div>
+            </div>
+            <div class="vac-config">
+              <div class="dc-grp-title"><span data-i18n="vac.title">Absaugungs-Automatik (externer Ausgang)</span> <span class="help" tabindex="0" data-i18n-tip="help.vacAuto">?</span></div>
+              <label class="vac-row"><input type="checkbox" id="vacAuto" data-path="vacuum.enable" checked /> <span data-i18n="vac.auto">Automatik: an bei Jobstart, aus nach Jobende</span></label>
+              <label class="vac-row"><span data-i18n="vac.linger">Nachlauf (s)</span> <input type="number" id="vacLinger" class="vac-linger" data-path="vacuum.lingerSec" min="0" step="1" value="10" /></label>
+              <label class="vac-row"><input type="checkbox" id="vacPauseTc" data-path="vacuum.pauseToolChange" /> <span data-i18n="vac.pauseTc">Beim Werkzeugwechsel (M6) pausieren</span></label>
+              <label class="vac-row"><input type="checkbox" id="vacLaser" data-path="vacuum.laser" checked /> <span data-i18n="vac.laser">Auch beim Laser-Programm</span></label>
+              <p class="muted vac-note" data-i18n="vac.note">Schaltet den externen Ausgang der Carvera Air (M851/M852), an dem Luftreiniger/Sauger hängen – im erzeugten G-Code (läuft auch ohne App) und app-seitig (Aus nach Abbruch/Fehler mit Nachlauf).</p>
             </div>
           </details>
 
@@ -353,7 +454,9 @@
             <button class="btn small danger" data-action="stop" data-i18n="run.stop">■ Stop</button>
             <span class="help" tabindex="0" data-i18n-tip="help.runControls">?</span>
           </div>
-          <pre id="mConsole" class="console"></pre>
+          <div class="mconsole-head"><span data-i18n="dock.log">Maschinen-Log</span><span class="mconsole-actions"><button id="mConsoleAiBtn" class="btn small ghost" data-i18n="ai.diagnose" data-i18n-title="ai.diagnoseTitle" title="Das Log von der KI analysieren lassen">🤖 KI fragen</button><button id="mConsoleCopy" class="btn small ghost" data-i18n="dock.copy">Kopieren</button></span></div>
+          <pre id="mConsole" class="console mach-console"></pre>
+          <div id="mConsoleAi" class="ai-result mconsole-ai hidden"></div>
 
           <details id="troubleHelp" class="trouble">
             <summary data-i18n="trouble.summary">Hilfe &amp; Fehlerbehebung</summary>
@@ -388,6 +491,7 @@
               </div>
             </div>
           </div>
+          <div id="fabWizard" class="fab-wizard hidden"></div>
           <h3 class="sub" data-i18n="fab.sub">Arbeitsschritte – Schritt für Schritt</h3>
           <div id="fabSteps" class="fab-steps"><p class="muted" data-i18n="fab.stepsPlaceholder">Board laden – dann erscheinen hier alle Schritte mit Zeit, Werkzeugwechsel-Ansage und den Lack-/Trocken-Schritten.</p></div>
           <details class="trouble" id="fabLogPanel">
@@ -411,6 +515,54 @@
         </div>
       </section>
     </main>
+
+    <!-- persistent machine dock (visible on every tab) -->
+    <div id="machDock" class="mach-dock collapsed">
+      <div class="dock-bar">
+        <button id="dockToggle" class="dock-toggle" title="Log &amp; Steuerung" aria-label="toggle">▲</button>
+        <span id="dockConn" class="pill off dock-conn" data-i18n="machine.hdrDisconnected">Maschine getrennt</span>
+        <span class="dock-stat"><label data-i18n="stat.state">Status</label><b data-s="state">—</b></span>
+        <span class="dock-stat"><label data-i18n="stat.wpos">WPos</label><b data-s="wpos">—</b></span>
+        <span class="dock-stat"><label data-i18n="stat.origin">Nullpunkt</label><b data-s="origin">—</b></span>
+        <span class="dock-stat"><label data-i18n="stat.tool">Werkzeug</label><b data-s="tool">—</b></span>
+        <span class="dock-stat"><label data-i18n="stat.spin">Spindel</label><b data-s="spin">—</b></span>
+        <span class="dock-flex"></span>
+        <button class="btn small" data-action="pause" title="Pause">⏸</button>
+        <button class="btn small" data-action="resume" title="Fortsetzen">▶</button>
+        <button class="btn small danger" data-action="stop" title="Stop">■</button>
+        <button id="dockGoMachine" class="btn small ghost" data-i18n="dock.full">Maschine</button>
+      </div>
+      <div class="dock-panel">
+        <div class="dock-controls">
+          <div class="jog-pad dock-jog">
+            <button class="jbtn" data-jog="Y" data-sign="1" style="grid-area:yp">Y+</button>
+            <button class="jbtn" data-jog="X" data-sign="-1" style="grid-area:xm">X−</button>
+            <button class="jbtn home" data-action="home" data-i18n-title="jog.homeTitle" title="Home ($H) – Referenzfahrt zur Ecke oben rechts">⌂</button>
+            <button class="jbtn" data-jog="X" data-sign="1" style="grid-area:xp">X+</button>
+            <button class="jbtn" data-jog="Y" data-sign="-1" style="grid-area:ym">Y−</button>
+            <button class="jbtn" data-jog="Z" data-sign="1" style="grid-area:zp">Z+</button>
+            <button class="jbtn" data-jog="Z" data-sign="-1" style="grid-area:zm">Z−</button>
+            <button class="jbtn" data-jog="A" data-sign="-1" style="grid-area:am" title="A −">A−</button>
+            <button class="jbtn" data-jog="A" data-sign="1" style="grid-area:ap" title="A +">A+</button>
+          </div>
+          <div class="dock-quick">
+            <button class="btn small ghost" data-action="unlock" data-i18n="dc.unlock">Entsperren ($X)</button>
+            <button class="btn small ghost" data-action="reset" data-i18n="dc.reset">Reset</button>
+            <button class="btn small ghost" data-action="gotoClearance" data-i18n="dc.gotoClearance">→ Parkposition (oben rechts)</button>
+            <button class="btn small ghost" data-action="gotoOrigin" data-i18n="dc.gotoOrigin">→ Werkstück-Nullpunkt</button>
+            <button class="btn small ghost" data-action="probeIn" data-i18n="dc.probeIn">Probe (T0)</button>
+          </div>
+        </div>
+        <div class="dock-log-wrap">
+          <div class="dock-log-head"><span data-i18n="dock.log">Maschinen-Log</span><span class="mconsole-actions"><button id="dockAiBtn" class="btn small ghost" data-i18n="ai.diagnose">🤖 KI fragen</button><button id="dockCopyLog" class="btn small ghost" data-i18n="dock.copy">Kopieren</button></span></div>
+          <pre id="dockConsole" class="console mach-console"></pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- M6 tool-change wait: full-page modal overlay (rendered by app.js) -->
+    <div id="toolOverlay" class="tool-overlay hidden"></div>
+    <div id="hmModal" class="hm-modal hidden"></div>
 
     <div id="toast" class="toast hidden"></div>
     <script src="view3d.bundle.js"></script>

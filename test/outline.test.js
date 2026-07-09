@@ -35,3 +35,31 @@ test('generateOutline offsets outward and places tabs', () => {
   assert.ok(Math.max(...xs) > 10);
   assert.ok(Math.min(...xs) < 0);
 });
+
+test('inner cutouts offset inward and are cut before the outer profile', () => {
+  const outer = [
+    { points: [[0, 0], [20, 0]] },
+    { points: [[20, 0], [20, 20]] },
+    { points: [[20, 20], [0, 20]] },
+    { points: [[0, 20], [0, 0]] },
+  ];
+  const inner = [
+    { points: [[8, 8], [12, 8]] },
+    { points: [[12, 8], [12, 12]] },
+    { points: [[12, 12], [8, 12]] },
+    { points: [[8, 12], [8, 8]] },
+  ];
+  const cfg = structuredClone(defaultConfig);
+  cfg.outline.cutterDiameter = 1.0;
+  cfg.outline.tabs = 0;
+  const res = generateOutline([...outer, ...inner], cfg);
+  assert.equal(res.loops.length, 2);
+  // Smaller inner loop first, larger outer loop last.
+  assert.ok(res.loops[0].area < res.loops[1].area);
+  const innerXs = res.loops[0].pts.map((p) => p.x);
+  const outerXs = res.loops[1].pts.map((p) => p.x);
+  // Inner hole shrinks (offset inward): max X stays inside the 12 mm edge line.
+  assert.ok(Math.max(...innerXs) < 12.5);
+  // Outer profile still grows beyond the 20 mm board edge.
+  assert.ok(Math.max(...outerXs) > 20);
+});

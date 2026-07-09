@@ -162,6 +162,17 @@ class FrameDecoder {
   }
 }
 
+// Field keys of the official firmware status report (Kernel.cpp
+// get_query_string(), v1.0.6 lines 256-489). The 1.0.6 format is
+// pipe-separated with 5-value MPos/WPos (X,Y,Z,A,B):
+//   <Idle|MPos:x,y,z,a,b|WPos:x,y,z,a,b|F:cur,req,ovr|S:rpm,req,ovr,vac,
+//    spindleT,powerT,0,0,ext|T:active,tlo,target|W:volt|L:...|P:lines,pct,secs
+//    [|A:atcState][|O:maxLevelDelta][|H:haltReason]|C:model,func,inch,abs>
+//   * T carries the TARGET tool as 3rd value on manual-tool-change machines
+//     (Air), Kernel.cpp:408-411.
+//   * O only appears while auto-leveling compensation is ACTIVE and carries
+//     the height map's max deviation (Kernel.cpp:469-474) — surfaced as
+//     `leveling` for the UI plausibility warnings.
 const STATUS_KEYS = {
   MPos: 'mpos',
   WPos: 'wpos',
@@ -172,13 +183,15 @@ const STATUS_KEYS = {
   W: 'probe',
   P: 'play',
   A: 'setup',
+  O: 'leveling',
   H: 'halt',
+  C: 'modes',
 };
 
 // Parse a status frame into an object. Handles both the Carvera comma format
 //   <Idle,MPos:0,0,0,WPos:1,2,3,F:0,0,100,S:0,0,100,T:1,0>
-// and the grbl-style pipe format
-//   <Idle|MPos:0,0,0|WPos:1,2,3|...>
+// and the grbl-style pipe format of the current firmware (see STATUS_KEYS)
+//   <Idle|MPos:0,0,0,0,0|WPos:1,2,3,0,0|...>
 export function parseStatus(text) {
   const lt = text.indexOf('<');
   const gt = text.indexOf('>', lt);

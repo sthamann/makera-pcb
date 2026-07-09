@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0e1116" />
+    <title>makera-pcb · Mobile Remote</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="mobile.css" />
+  </head>
+  <body>
+    <header class="mob-top">
+      <div class="brand">
+        <span class="logo">◑</span>
+        <div class="brand-txt">
+          <h1>makera-pcb</h1>
+          <span class="sub" data-i="title.sub">Fernbedienung</span>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span id="connPill" class="pill off" data-i="conn.off">getrennt</span>
+        <button id="langBtn" class="btn ghost lang" aria-label="Language">EN</button>
+      </div>
+    </header>
+
+    <main>
+      <div id="netBanner" class="banner net hidden" data-i="net.lost"></div>
+      <div id="alarmBanner" class="banner alarm hidden"></div>
+
+      <!-- connection -->
+      <section class="card">
+        <h2 data-i="conn.title">Verbindung</h2>
+        <div class="conn-row">
+          <button id="discoverBtn" class="btn wide" data-i="conn.discover">Maschine suchen</button>
+        </div>
+        <div id="foundList" class="found"></div>
+        <div class="conn-row">
+          <input id="ipInput" type="text" inputmode="decimal" placeholder="192.168.x.x" autocomplete="off" />
+          <input id="portInput" type="number" value="2222" class="port" />
+        </div>
+        <div class="conn-row">
+          <button id="connectBtn" class="btn primary half" data-i="conn.connect">Verbinden</button>
+          <button id="disconnectBtn" class="btn ghost half" disabled data-i="conn.disconnect">Trennen</button>
+        </div>
+        <p class="muted" data-i="conn.hint">Die Verbindung zur Maschine hält der Rechner, auf dem makera-pcb läuft — Desktop und Handy teilen sie sich.</p>
+        <p id="lanHint" class="muted hidden"></p>
+      </section>
+
+      <!-- live status -->
+      <section class="card">
+        <h2 data-i="status.title">Status</h2>
+        <div id="bigState" class="big-state">—</div>
+        <div class="pos-label" data-i="status.wpos">Werkstück (WPos · G54)</div>
+        <div class="pos-grid wpos">
+          <div class="pos-tile"><span>X</span><b id="wposX">—</b></div>
+          <div class="pos-tile"><span>Y</span><b id="wposY">—</b></div>
+          <div class="pos-tile"><span>Z</span><b id="wposZ">—</b></div>
+        </div>
+        <div class="pos-label sec" data-i="status.mpos">Maschine (MPos)</div>
+        <div id="mposLine" class="mpos-line">—</div>
+        <div class="stat-row">
+          <div class="stat"><span data-i="status.feed">Vorschub</span><b id="statFeed">—</b></div>
+          <div class="stat"><span data-i="status.spindle">Spindel</span><b id="statSpin">—</b></div>
+          <div class="stat"><span data-i="status.tool">Werkzeug</span><b id="statTool">—</b></div>
+        </div>
+      </section>
+
+      <!-- job progress -->
+      <section class="card hidden" id="progCard">
+        <h2 data-i="job.progress">Fortschritt</h2>
+        <div class="pbar"><div id="progFill" class="pbar-fill"></div></div>
+        <div class="pmeta"><span id="progPct">0 %</span><span id="progTime">—</span></div>
+      </section>
+
+      <!-- jog -->
+      <section class="card">
+        <h2 data-i="jog.title">Jog</h2>
+        <div class="step-row">
+          <span class="muted" data-i="jog.step">Schritt</span>
+          <div class="seg" id="stepSeg">
+            <button data-step="0.1">0.1</button>
+            <button data-step="1" class="active">1</button>
+            <button data-step="10">10</button>
+          </div>
+          <span class="muted">mm</span>
+        </div>
+        <div class="jog-wrap">
+          <div class="jog-cross">
+            <button class="jbtn" data-jog="Y" data-sign="1" data-need-conn style="grid-area:yp">Y+</button>
+            <button class="jbtn" data-jog="X" data-sign="-1" data-need-conn style="grid-area:xm">X−</button>
+            <div class="jog-center" id="stepLabel" style="grid-area:c">1<small>mm</small></div>
+            <button class="jbtn" data-jog="X" data-sign="1" data-need-conn style="grid-area:xp">X+</button>
+            <button class="jbtn" data-jog="Y" data-sign="-1" data-need-conn style="grid-area:ym">Y−</button>
+          </div>
+          <div class="jog-z">
+            <button class="jbtn" data-jog="Z" data-sign="1" data-need-conn>Z+</button>
+            <button class="jbtn" data-jog="Z" data-sign="-1" data-need-conn>Z−</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- core actions -->
+      <section class="card">
+        <h2 data-i="act.title">Aktionen</h2>
+        <div class="act-grid">
+          <button id="homeBtn" class="btn act" data-need-conn data-i="act.home">Home (Referenz oben rechts)</button>
+          <button id="unlockBtn" class="btn act" data-need-conn data-i="act.unlock">Entsperren ($X)</button>
+          <button id="gotoOriginBtn" class="btn act" data-need-conn data-i="act.gotoOrigin">→ Werkstück-Nullpunkt</button>
+          <button id="setXYZBtn" class="btn act warn" data-need-conn data-i="act.setXYZ">Origin hier setzen (XYZ)</button>
+          <button id="setXYBtn" class="btn act warn" data-need-conn data-i="act.setXY">Origin hier setzen (XY)</button>
+        </div>
+      </section>
+
+      <!-- job control -->
+      <section class="card">
+        <h2 data-i="job.title">Job</h2>
+        <div class="job-row">
+          <button id="pauseBtn" class="btn job" data-need-conn data-i="job.pause">⏸ Pause</button>
+          <button id="resumeBtn" class="btn job" data-need-conn data-i="job.resume">▶ Fortsetzen</button>
+          <button id="stopBtn" class="btn job danger" data-need-conn data-i="job.stop">■ Stop</button>
+        </div>
+      </section>
+
+      <!-- accessories -->
+      <section class="card">
+        <details>
+          <summary data-i="acc.title">Zubehör</summary>
+          <div class="acc-grid">
+            <div class="acc-row"><span data-i="acc.light">Licht</span>
+              <button class="btn acc" data-cmd="M821" data-need-conn data-i="acc.on">An</button>
+              <button class="btn acc ghost" data-cmd="M822" data-need-conn data-i="acc.off">Aus</button></div>
+            <div class="acc-row vac"><span><span data-i="acc.vac">Absaugung</span> <span id="vacState" class="vac-state">—</span></span>
+              <button class="btn acc" data-cmd="M851" data-need-conn data-i="acc.on">An</button>
+              <button class="btn acc ghost" data-cmd="M852" data-need-conn data-i="acc.off">Aus</button></div>
+            <div class="acc-row"><span data-i="acc.fan">Spindel-Lüfter</span>
+              <button class="btn acc" data-cmd="M811 S100" data-need-conn data-i="acc.on">An</button>
+              <button class="btn acc ghost" data-cmd="M812" data-need-conn data-i="acc.off">Aus</button></div>
+            <div class="acc-row"><span data-i="acc.beep">Piep</span>
+              <button class="btn acc" data-cmd="M861" data-need-conn data-i="acc.on">An</button>
+              <button class="btn acc ghost" data-cmd="M862" data-need-conn data-i="acc.off">Aus</button></div>
+          </div>
+        </details>
+      </section>
+
+      <p class="foot muted"><a href="/" data-i="foot.desktop">Desktop-Ansicht öffnen</a></p>
+    </main>
+
+    <!-- M6 tool-change wait: full-page overlay (rendered by mobile.js) -->
+    <div id="toolOverlay" class="tool-overlay hidden"></div>
+
+    <!-- confirm modal -->
+    <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-box">
+        <p id="modalMsg"></p>
+        <div class="modal-actions">
+          <button id="modalNo" class="btn ghost" data-i="confirm.no">Abbrechen</button>
+          <button id="modalYes" class="btn danger" data-i="confirm.yes">Ja</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="mobile.js"></script>
+  </body>
+</html>

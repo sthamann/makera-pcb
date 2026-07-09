@@ -4,10 +4,12 @@
 
 import { isolationToolWidth } from './config.js';
 
-export function buildReport({ cfg, board, iso, drill, outline, checks, files, warnings, toolForOp, laserOn, silkPresent }) {
+export function buildReport({ cfg, board, iso, drill, outline, checks, files, warnings, toolForOp, laserOn, clearingOn, silkPresent, placement }) {
   const L = [];
   const p = (s = '') => L.push(s);
   const sm = !!cfg.solderMask?.enable;
+  const vac = !!cfg.vacuum?.enable;
+  const place = placement && (placement.x || placement.y) ? placement : null;
 
   const toolLabel = (opId, fallback) => {
     const t = toolForOp ? toolForOp(opId) : null;
@@ -16,6 +18,7 @@ export function buildReport({ cfg, board, iso, drill, outline, checks, files, wa
   };
   const isoTool = toolLabel('isolation',
     cfg.isolation.tool === 'endmill' ? `Flachfräser ${cfg.isolation.endmillDiameter} mm` : `V-Bit ${cfg.isolation.vbitAngleDeg}°/${cfg.isolation.tipWidth} mm`);
+  const clearTool = toolLabel('clearing', `Flachfräser/Corn-Bit ${cfg.clearing.toolDiameter} mm`);
   const outTool = toolLabel('outline', `Fräser ${cfg.outline.cutterDiameter} mm`);
 
   p('# Fertigungs-Anleitung · Makera Carvera Air');
@@ -25,6 +28,13 @@ export function buildReport({ cfg, board, iso, drill, outline, checks, files, wa
     p(`Rohling: **${cfg.stock.sizeX} × ${cfg.stock.sizeY} mm**, ${cfg.stock.sides === 'double' ? 'doppelseitig' : 'einseitig'} (Makera-Standard).`);
   }
   p(`Modus: ${sm ? '**mit UV-Lötstopplack**' : 'ohne Lötstopplack'}${laserOn ? ' · **mit Laser-Silkscreen**' : ''}.`);
+  if (place) {
+    p(`Platzierung: Board um **X ${place.x} / Y ${place.y} mm** von der Rohling-Ecke versetzt (Werkstück-Nullpunkt bleibt am Anker-Offset; alle Programme sind entsprechend verschoben).`);
+  }
+  if (vac) {
+    const linger = cfg.vacuum?.lingerSec ?? 10;
+    p(`Absaugung: **automatisch** – der externe Ausgang (Luftreiniger/Sauger) wird per \`M851\` nach jedem Spindelstart eingeschaltet und nach Programmende mit **${linger} s Nachlauf** per \`M852\` ausgeschaltet${cfg.vacuum?.pauseToolChange ? ', beim M6-Werkzeugwechsel pausiert' : ''}${laserOn && cfg.vacuum?.laser !== false ? ' (auch im Laser-Programm)' : ''}.`);
+  }
   p('');
 
   // ---- Bill of materials / tools ----
@@ -32,6 +42,7 @@ export function buildReport({ cfg, board, iso, drill, outline, checks, files, wa
   p('');
   p('- Kupfer-Platine (FR4, ' + cfg.material.thickness + ' mm), etwas größer als das Board, plane Opferplatte, Klemmen/Klebeband');
   p('- ' + isoTool.replace(/\*\*/g, '') + ' (Isolation)');
+  if (clearingOn) p('- ' + clearTool.replace(/\*\*/g, '') + ' (Kupfer-Clearing / Flächenabtrag)');
   for (const g of drill.groups) p(`- Bohrer ${g.bitDiameter.toFixed(2)} mm (${g.holes.length}×)`);
   if (outline.loops.length) p('- ' + outTool.replace(/\*\*/g, '') + ' (Außenkontur)');
   if (sm) {
@@ -59,11 +70,21 @@ export function buildReport({ cfg, board, iso, drill, outline, checks, files, wa
   const step = (title, lines) => { p(`### Schritt ${n++} · ${title}`); for (const l of lines) p(l); p(''); };
 
   step('Isolation fräsen', [
-    `- ⏸ **Werkzeug einsetzen:** ${isoTool} (erst nach dem Leveling). Werkzeuglänge wird automatisch gemessen.`,
+    `- ⏸ **Werkzeug einsetzen:** ${isoTool} (erst nach dem Leveling). Jede Einzeldatei startet mit \`M6\` — Werkzeuglänge wird automatisch gemessen.`,
     `- Programm **${files.isolation}** laden (Höhenkarte bleibt aktiv), starten.`,
     `- Frästiefe ${cfg.isolation.cutDepth} mm, ${iso.passes.length} Bahn(en). Trennt die Leiterbahnen vom Restkupfer.`,
-    '- Hinweis: Dieses Programm macht **Isolation** (Trennkanäle). Das Makera-Beispiel räumt zusätzlich das Restkupfer flächig ab („Area Cleaning") – für die Funktion nicht nötig, nur optisch/HF-relevant.',
+    clearingOn
+      ? '- Hinweis: Dieses Programm macht **Isolation** (Trennkanäle). Das Restkupfer wird anschließend im **Kupfer-Clearing** flächig abgeräumt.'
+      : '- Hinweis: Dieses Programm macht **Isolation** (Trennkanäle). Das Makera-Beispiel räumt zusätzlich das Restkupfer flächig ab („Area Cleaning") – für die Funktion nicht nötig, nur optisch/HF-relevant.',
   ]);
+
+  if (clearingOn) {
+    step('Kupfer-Clearing (Restkupfer abräumen)', [
+      `- ⏸ **Werkzeug wechseln:** ${clearTool}. Werkzeuglänge wird automatisch gemessen.`,
+      `- Programm **${files.clearing || '(Clearing-Datei)'}** laden, starten. Frästiefe ${cfg.clearing.cutDepth} mm.`,
+      `- Räumt das Hintergrundkupfer flächig ab (konzentrische Bahnen), hält dabei ${cfg.clearing.gap} mm Abstand zu den Leiterbahnen und ${cfg.clearing.margin} mm zum Board-Rand.`,
+    ]);
+  }
 
   if (sm) {
     step('Reinigen & anschleifen', [
@@ -75,7 +96,7 @@ export function buildReport({ cfg, board, iso, drill, outline, checks, files, wa
       '- Roller und Werkzeuge sofort mit Alkohol reinigen.',
     ]);
     step('Lötstopplack von den Pads entfernen', [
-      '- ⏸ **Werkzeug wechseln:** Lötstopplack-Entfernungsfräser (No.5, spring-loaded). Z sorgfältig antasten (bei Federfräser ggf. manuell auf Z0 über dem Board setzen).',
+      `- ⏸ **Werkzeug wechseln:** ${toolLabel('maskRemove', 'Lötstopplack-Entfernungsfräser (No.5, spring-loaded)')}. Z sorgfältig antasten (bei Federfräser ggf. manuell auf Z0 über dem Board setzen).`,
       '- Freilegt nur die Pad-/Bohrflächen, damit sie lötbar sind.',
     ]);
   }
@@ -83,14 +104,14 @@ export function buildReport({ cfg, board, iso, drill, outline, checks, files, wa
   for (const g of drill.groups) {
     const t = toolLabel(`drill:${g.bitDiameter.toFixed(2)}`, `Bohrer ${g.bitDiameter.toFixed(2)} mm`);
     step(`Bohren ${g.bitDiameter.toFixed(2)} mm (${g.holes.length}×)`, [
-      `- ⏸ **Werkzeug wechseln:** ${t}. Z antasten.`,
+      `- ⏸ **Werkzeug wechseln:** ${t}. \`M6\` in der Datei misst die Länge automatisch.`,
       `- Programm **${files.drill[g.tool] || '(Bohrdatei)'}** laden, starten. Peck ${cfg.drill.peck} mm, Tiefe ${g.depth.toFixed(2)} mm.`,
     ]);
   }
 
   if (outline.loops.length) {
     step('Außenkontur schneiden', [
-      `- ⏸ **Werkzeug wechseln:** ${outTool}. Z antasten.`,
+      `- ⏸ **Werkzeug wechseln:** ${outTool}. \`M6\` in der Datei misst die Länge automatisch.`,
       `- Programm **${files.outline}** laden, starten. ${cfg.outline.tabs} Haltestege lassen das Board bis zuletzt fixiert.`,
     ]);
   }
@@ -117,21 +138,28 @@ export function buildReport({ cfg, board, iso, drill, outline, checks, files, wa
   p('| Schritt | Werkzeug | Tiefe | Vorschub XY | Drehzahl |');
   p('|---|---|---|---|---|');
   p(`| Isolation | ${stripBold(isoTool)} (eff. ${isolationToolWidth(cfg.isolation).toFixed(3)} mm) | ${cfg.isolation.cutDepth} mm | ${effFeed('isolation')} | ${effRpm('isolation', cfg.isolation.rpm)} |`);
+  if (clearingOn) {
+    p(`| Kupfer-Clearing | ${stripBold(clearTool)} | ${cfg.clearing.cutDepth} mm | ${effFeed('clearing')} | ${effRpm('clearing', cfg.clearing.rpm)} |`);
+  }
   for (const g of drill.groups) {
     const opId = `drill:${g.bitDiameter.toFixed(2)}`;
     p(`| Bohren ${g.bitDiameter.toFixed(2)} mm | ${stripBold(toolLabel(opId, '–'))} | ${g.depth.toFixed(2)} mm | – | ${effRpm(opId, cfg.drill.rpm)} |`);
   }
   if (outline.loops.length) {
-    const outDepth = (cfg.material.thickness + 0.2).toFixed(2);
-    p(`| Außenkontur | ${stripBold(outTool)} | ${outDepth} mm (${cfg.outline.tabs} Tabs) | ${effFeed('outline')} | ${effRpm('outline', cfg.outline.rpm)} |`);
+    const margin = cfg.outline.throughMargin ?? cfg.drill.throughMargin ?? 0.2;
+    const outDepth = (cfg.material.thickness + margin).toFixed(2);
+    p(`| Außenkontur | ${stripBold(outTool)} | ${outDepth} mm (${cfg.outline.tabs} Tabs, Resthöhe Steg ${cfg.outline.tabHeight} mm) | ${effFeed('outline')} | ${effRpm('outline', cfg.outline.rpm)} |`);
   }
   if (laserOn) p(`| Laser Silkscreen | Laser 5 W | – | ${cfg.laser.feedXY} mm/min | ${Math.round((cfg.laser.power || 0) * 100)} % |`);
   p('');
 
   function effFeed(opId) {
-    const t = toolForOp ? toolForOp(opId === 'isolation' ? 'isolation' : opId) : null;
+    const t = toolForOp ? toolForOp(opId) : null;
     if (t && t.feedXY != null) return `${t.feedXY} mm/min`;
-    return `${opId === 'isolation' ? cfg.isolation.feedXY : cfg.outline.feedXY} mm/min`;
+    const fallback = opId === 'isolation' ? cfg.isolation.feedXY
+      : opId === 'clearing' ? cfg.clearing.feedXY
+      : cfg.outline.feedXY;
+    return `${fallback} mm/min`;
   }
   function effRpm(opId, fallback) {
     const t = toolForOp ? toolForOp(opId) : null;

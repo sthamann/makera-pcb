@@ -2,6 +2,31 @@
 // Every value is overridable from the CLI/Web UI. Feeds/speeds are deliberately
 // conservative starting points; verify on your machine and material.
 
+// Anchor offset + clamp margin live in the SHARED stock-fit module so the
+// browser preview and the server-side feasibility check use the same numbers.
+export { CARVERA_ANCHOR_OFFSET, STOCK_CLAMP_MARGIN_MM, PLACEMENT_SNAP_MM } from '../web/public/stock-fit.js';
+// External vacuum / air cleaner codes + default run-on are shared with the
+// browser machine control (single source of truth, firmware-verified there).
+import { VACUUM_LINGER_DEFAULT_S } from '../web/public/machine-commands.js';
+export { VACUUM_ON_COMMAND, VACUUM_OFF_COMMAND, VACUUM_LINGER_DEFAULT_S } from '../web/public/machine-commands.js';
+// Makera solder-mask removal bit (No.5, spring-loaded) — used for the
+// mask-removal tool-assignment row (guided manual step, no G-code).
+export const SOLDER_MASK_REMOVER_DIAMETER = 0.9;
+export const SOLDER_MASK_REMOVER_RPM = 6000;
+// Nominal 5 W laser spot size for the silkscreen-engraving assignment row.
+export const LASER_SPOT_DIAMETER = 0.1;
+// Clearance high enough to pass over Carvera top clamps on cross-board rapids.
+export const CARVERA_SAFE_Z_DEFAULT = 12.0;
+// Short Z hop between nearby features on the same board (must stay below safeZ).
+export const CARVERA_TRAVEL_Z_DEFAULT = 2.0;
+// Fallback tool numbers when no tool-library assignment is present (Makera kit).
+export const DEFAULT_TOOL_NUMBER = {
+  isolation: 1,
+  clearing: 3,
+  outline: 4,
+  drillBase: 2,
+};
+
 export const defaultConfig = {
   material: {
     thickness: 1.5, // mm (Makera blanks are 1.5 mm copper-clad FR4)
@@ -15,8 +40,29 @@ export const defaultConfig = {
     sides: 'single',
   },
   origin: 'edge-cuts', // work origin at the outline bottom-left corner
-  safeZ: 5.0, // rapid clearance above stock
-  travelZ: 1.5, // low hop between nearby features
+  safeZ: CARVERA_SAFE_Z_DEFAULT, // rapid clearance above stock / clamps
+  travelZ: CARVERA_TRAVEL_Z_DEFAULT, // low hop between nearby features on the board
+
+  // Board placement on the blank (drag & drop in the Material tab): offset of
+  // the board's bottom-left corner from the work origin (= blank corner at
+  // anchor 1 + X15/Y10), in mm. The work origin itself NEVER moves — the
+  // offset shifts every operation in the generated G-code instead.
+  placement: {
+    offsetX: 0,
+    offsetY: 0,
+  },
+
+  // External vacuum / air cleaner on the Carvera Air EXTERNAL CONTROL PORT
+  // (switch.extendout, M851/M852 — see web/public/machine-commands.js for the
+  // firmware evidence). When enabled, every generated program switches the
+  // port on after the spindle start and off after the program end, with a
+  // dwell (G4) run-on so dust still in the air gets collected.
+  vacuum: {
+    enable: true, // automation on by default
+    lingerSec: VACUUM_LINGER_DEFAULT_S, // run-on after the job (G4 P<sec>)
+    pauseToolChange: false, // switch off while an M6 waits for the tool swap
+    laser: true, // also run during the separate laser program
+  },
 
   isolation: {
     tool: 'vbit', // 'vbit' | 'endmill'
@@ -45,14 +91,30 @@ export const defaultConfig = {
   outline: {
     cutterDiameter: 1.0, // flat end mill for the board profile
     depthPerPass: 0.4, // mm per pass
+    throughMargin: 0.2, // extra depth below material bottom on the final pass
     feedXY: 250, // mm/min
     plungeFeed: 80, // mm/min
     rpm: 12000,
     tabs: 4, // holding tabs so the board does not break free
     tabWidth: 2.0, // mm along the cut
-    tabHeight: 0.4, // mm of material left under each tab
+    tabHeight: 0.4, // mm of material left under each tab (measured from stock bottom)
     climb: true, // climb vs conventional milling direction
     offsetSide: 'outside', // cut on the outside of the profile line
+  },
+
+  // Copper-area clearing (background pour removal): mill AWAY all remaining
+  // background copper so only the traces remain (like a fully etched board),
+  // using a flat endmill / corn bit with a concentric-offset pocket fill.
+  clearing: {
+    enable: false, // opt-in, like laser/solderMask
+    toolDiameter: 1.0, // mm flat endmill / corn bit
+    stepoverFrac: 0.4, // fraction of tool diameter overlapped between passes
+    cutDepth: 0.12, // mm into copper/FR4 (copper is ~0.035 mm)
+    margin: 0.4, // keep this far inside the board edge (don't touch the outline)
+    gap: 0.1, // extra clearance kept around traces beyond the isolation channel
+    feedXY: 500, // mm/min
+    plungeFeed: 300, // mm/min
+    rpm: 12000,
   },
 
   laser: {

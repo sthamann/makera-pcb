@@ -4,12 +4,16 @@
 import { parseGerber, toFilledPolygons } from './gerber/parser.js';
 import { parseExcellon } from './excellon/parser.js';
 import { generateIsolation } from './cam/isolation.js';
+import { generateClearing } from './cam/clearing.js';
 import { generateDrill } from './cam/drill.js';
 import { generateOutline } from './cam/outline.js';
-import { isolationGcode, drillGcode, outlineGcode, combinedGcode, laserGcode } from './cam/gcode.js';
+import { isolationGcode, clearingGcode, drillGcode, outlineGcode, combinedGcode, laserGcode } from './cam/gcode.js';
 import { runChecks } from './cam/checks.js';
 import { buildReport } from './report.js';
-import { defaultConfig, mergeConfig, isolationToolWidth } from './config.js';
+import {
+  defaultConfig, mergeConfig, isolationToolWidth, DEFAULT_TOOL_NUMBER,
+  SOLDER_MASK_REMOVER_DIAMETER, SOLDER_MASK_REMOVER_RPM, LASER_SPOT_DIAMETER,
+} from './config.js';
 import { boundingBox } from './geometry/clipper.js';
 
 export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
@@ -61,7 +65,27 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
     height: boardBounds.maxY - boardBounds.minY,
   };
 
+  // Board placement offset on the blank (drag & drop in the Material tab).
+  // THE single insertion point for the whole pipeline: the G-code emitters map
+  // board coordinates with `p - origin`, so shifting the work origin by
+  // -offset moves EVERY operation (isolation, clearing, drills, outline,
+  // laser) to work (offset.x, offset.y) — the work origin itself stays at the
+  // blank corner (anchor 1 + X15/Y10). Geometry generation and the preview
+  // remain board-local and untouched.
+  const placement = {
+    x: Math.max(0, Number(cfg.placement?.offsetX) || 0),
+    y: Math.max(0, Number(cfg.placement?.offsetY) || 0),
+  };
+  const gcodeOrigin = { x: origin.x - placement.x, y: origin.y - placement.y };
+
   const iso = generateIsolation(copperPolys, cfg.isolation);
+
+  // Optional copper-area clearing (background pour removal). Mills away the
+  // remaining background copper; the halo keeps the tool clear of every trace.
+  let clearing = { paths: [] };
+  if (cfg.clearing.enable) {
+    clearing = generateClearing(copperPolys, boardBounds, cfg, isolationToolWidth(cfg.isolation));
+  }
 
   let drillResult = { drills: [] };
   let drillGen = { groups: [], warnings: [] };
@@ -88,6 +112,11 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
     const num = assignment[opId];
     return num != null ? tools.get(String(num)) : null;
   };
+  const resolveFileTool = (opId, rpm, fallbackNumber) => {
+    const t = toolForOp(opId);
+    if (t) return { number: t.number, label: t.label || '', rpm: t.rpm ?? rpm };
+    return { number: fallbackNumber, label: '', rpm };
+  };
   const withTool = (section, opId) => {
     const t = toolForOp(opId);
     const c = structuredClone(cfg);
@@ -103,21 +132,49 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
   // --- G-code files ---
   const fileNames = { isolation: '1_isolation.nc', drill: {}, outline: null };
   const files = {};
-  files[fileNames.isolation] = isolationGcode(iso, withTool('isolation', 'isolation'), origin);
+  files[fileNames.isolation] = isolationGcode(
+    iso,
+    withTool('isolation', 'isolation'),
+    gcodeOrigin,
+    resolveFileTool('isolation', cfg.isolation.rpm, DEFAULT_TOOL_NUMBER.isolation),
+  );
+
+  if (cfg.clearing.enable && clearing.paths.length) {
+    const name = '1b_clearing.nc';
+    fileNames.clearing = name;
+    files[name] = clearingGcode(
+      clearing,
+      withTool('clearing', 'clearing'),
+      gcodeOrigin,
+      resolveFileTool('clearing', cfg.clearing.rpm, DEFAULT_TOOL_NUMBER.clearing),
+    );
+  }
 
   let idx = 2;
+  let drillFallback = DEFAULT_TOOL_NUMBER.drillBase;
   const drillGroupsSorted = drillGen.groups.slice().sort((a, b) => a.bitDiameter - b.bitDiameter);
   for (const g of drillGroupsSorted) {
+    const opId = `drill:${g.bitDiameter.toFixed(2)}`;
     const name = `${idx}_drill_${g.bitDiameter.toFixed(2)}mm.nc`;
     fileNames.drill[g.tool] = name;
-    files[name] = drillGcode(g, withTool('drill', `drill:${g.bitDiameter.toFixed(2)}`), origin);
+    files[name] = drillGcode(
+      g,
+      withTool('drill', opId),
+      gcodeOrigin,
+      resolveFileTool(opId, cfg.drill.rpm, drillFallback++),
+    );
     idx++;
   }
 
   if (outlineGen.loops.length) {
     const name = `${idx}_outline.nc`;
     fileNames.outline = name;
-    files[name] = outlineGcode(outlineGen, withTool('outline', 'outline'), origin);
+    files[name] = outlineGcode(
+      outlineGen,
+      withTool('outline', 'outline'),
+      gcodeOrigin,
+      resolveFileTool('outline', cfg.outline.rpm, DEFAULT_TOOL_NUMBER.outline),
+    );
     idx++;
   }
 
@@ -127,13 +184,17 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
   if (laserOn) {
     const name = `${idx}_silkscreen_laser.nc`;
     fileNames.laser = name;
-    files[name] = laserGcode(silkStrokes, cfg, origin);
+    files[name] = laserGcode(silkStrokes, cfg, gcodeOrigin);
     idx++;
   } else if (cfg.laser?.enable && !silkStrokes.length) {
     warnings.push('Laser aktiviert, aber keine Silkscreen-Geometrie vorhanden.');
   }
 
-  // Operations that need a tool assigned (drives the tool-library UI).
+  // Operations that need a tool assigned (drives the tool-library UI). The
+  // list mirrors the fabrication order and covers EVERY enabled step:
+  // isolation → clearing → solder-mask removal → drills → outline → laser.
+  // `separate: true` marks steps that run OUTSIDE the combined M6 spindle job
+  // (laser mode drops the tool; mask removal is a guided manual step).
   const operations = [
     {
       id: 'isolation',
@@ -142,14 +203,33 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
       diameter: isolationToolWidth(cfg.isolation),
       rpm: cfg.isolation.rpm,
     },
-    ...drillGroupsSorted.map((g) => ({
-      id: `drill:${g.bitDiameter.toFixed(2)}`,
-      title: `Bohren ${g.bitDiameter.toFixed(2)} mm`,
-      toolType: 'drill',
-      diameter: g.bitDiameter,
-      rpm: cfg.drill.rpm,
-    })),
   ];
+  if (cfg.clearing.enable && clearing.paths.length) {
+    operations.push({
+      id: 'clearing',
+      title: 'Kupfer-Clearing',
+      toolType: 'endmill',
+      diameter: cfg.clearing.toolDiameter,
+      rpm: cfg.clearing.rpm,
+    });
+  }
+  if (cfg.solderMask?.enable) {
+    operations.push({
+      id: 'maskRemove',
+      title: 'Lötstopplack von den Pads entfernen',
+      toolType: 'endmill',
+      diameter: SOLDER_MASK_REMOVER_DIAMETER,
+      rpm: SOLDER_MASK_REMOVER_RPM,
+      separate: true, // guided manual step — never part of 0_full_job.nc
+    });
+  }
+  operations.push(...drillGroupsSorted.map((g) => ({
+    id: `drill:${g.bitDiameter.toFixed(2)}`,
+    title: `Bohren ${g.bitDiameter.toFixed(2)} mm`,
+    toolType: 'drill',
+    diameter: g.bitDiameter,
+    rpm: cfg.drill.rpm,
+  })));
   if (outlineGen.loops.length) {
     operations.push({
       id: 'outline',
@@ -159,10 +239,23 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
       rpm: cfg.outline.rpm,
     });
   }
+  if (laserOn) {
+    operations.push({
+      id: 'laser',
+      title: 'Laser-Silkscreen',
+      toolType: 'laser',
+      diameter: LASER_SPOT_DIAMETER,
+      rpm: 0,
+      separate: true, // own program (M321/M322) — laser mode drops the tool
+    });
+  }
 
-  // Combined single program with M6 tool changes (if the caller assigned tools).
+  // Combined single program with M6 tool changes (if the caller assigned
+  // tools). Only SPINDLE operations belong in it — laser (M321 drops the tool)
+  // and the manual mask-removal step run separately by design.
+  const spindleOps = operations.filter((op) => !op.separate);
   const steps = [];
-  let combinedOk = operations.length > 0;
+  let combinedOk = spindleOps.length > 0;
   const resolveTool = (opId, rpm) => {
     const t = toolForOp(opId);
     if (!t) { combinedOk = false; return null; }
@@ -171,6 +264,10 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
   {
     const t = resolveTool('isolation', cfg.isolation.rpm);
     if (t) steps.push({ kind: 'isolation', title: 'Isolation', iso, tool: t, cfg: withTool('isolation', 'isolation') });
+  }
+  if (cfg.clearing.enable && clearing.paths.length) {
+    const t = resolveTool('clearing', cfg.clearing.rpm);
+    if (t) steps.push({ kind: 'clearing', title: 'Kupfer-Clearing', clearing, tool: t, cfg: withTool('clearing', 'clearing') });
   }
   for (const g of drillGroupsSorted) {
     const opId = `drill:${g.bitDiameter.toFixed(2)}`;
@@ -181,13 +278,13 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
     const t = resolveTool('outline', cfg.outline.rpm);
     if (t) steps.push({ kind: 'outline', title: 'Außenkontur', outline: outlineGen, tool: t, cfg: withTool('outline', 'outline') });
   }
-  if (combinedOk && steps.length === operations.length) {
-    files['0_full_job.nc'] = combinedGcode(steps, cfg, origin, { useCollet: !!config.useCollet });
+  if (combinedOk && steps.length === spindleOps.length) {
+    files['0_full_job.nc'] = combinedGcode(steps, cfg, gcodeOrigin);
     fileNames.combined = '0_full_job.nc';
   }
 
   // Rough machining-time estimates per operation (for the live fabrication view).
-  const times = estimateTimes({ iso, drillGroupsSorted, outlineGen, silkStrokes, laserOn, cfg, withTool });
+  const times = estimateTimes({ iso, clearing, drillGroupsSorted, outlineGen, silkStrokes, laserOn, cfg, withTool });
 
   const checks = runChecks({
     copperPolys,
@@ -210,18 +307,22 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
     tools,
     toolForOp,
     laserOn,
+    clearingOn: cfg.clearing.enable && clearing.paths.length > 0,
     silkPresent: silkStrokes.length > 0,
+    placement,
   });
 
   const preview = buildPreview({
     origin, board, copperPolys, silkPolys, iso, drillGen, outlineGen, cfg,
     laserStrokes: laserOn ? silkStrokes : [],
+    clearingPaths: cfg.clearing.enable ? clearing.paths : [],
   });
 
   return {
     cfg,
     board,
     origin,
+    placement,
     files,
     fileNames,
     report,
@@ -231,6 +332,7 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
     times,
     stats: {
       isolationRings: iso.ringCount,
+      clearingRings: clearing.paths.length,
       drillGroups: drillGen.groups.map((g) => ({ diameter: g.bitDiameter, holes: g.holes.length })),
       minCopperGap: checks.minCopperGap,
       totalSeconds: times.total,
@@ -240,7 +342,7 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
 }
 
 // Rough time model: cutting distance / feed + per-feature plunge/travel overhead.
-function estimateTimes({ iso, drillGroupsSorted, outlineGen, silkStrokes, laserOn, cfg, withTool }) {
+function estimateTimes({ iso, clearing, drillGroupsSorted, outlineGen, silkStrokes, laserOn, cfg, withTool }) {
   const segLen = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
   const ringLen = (r) => { let L = 0; for (let i = 1; i < r.length; i++) L += segLen(r[i - 1], r[i]); if (r.length > 1) L += segLen(r[r.length - 1], r[0]); return L; };
   const byOp = {};
@@ -253,6 +355,14 @@ function estimateTimes({ iso, drillGroupsSorted, outlineGen, silkStrokes, laserO
     for (const pass of iso.passes) for (const r of pass.rings) { L += ringLen(r); rings++; }
     byOp.isolation = (L / Math.max(1, c.feedXY)) * 60 + rings * 1.5;
   }
+  // clearing
+  if (clearing && clearing.paths.length) {
+    const c = withTool('clearing', 'clearing').clearing;
+    let L = 0;
+    let rings = 0;
+    for (const r of clearing.paths) { L += ringLen(r); rings++; }
+    byOp.clearing = (L / Math.max(1, c.feedXY)) * 60 + rings * 1.0;
+  }
   // drilling
   for (const g of drillGroupsSorted) {
     const c = withTool('drill', `drill:${g.bitDiameter.toFixed(2)}`).drill;
@@ -263,7 +373,8 @@ function estimateTimes({ iso, drillGroupsSorted, outlineGen, silkStrokes, laserO
   // outline
   if (outlineGen.loops.length) {
     const c = withTool('outline', 'outline').outline;
-    const passes = Math.max(1, Math.ceil((cfg.material.thickness + 0.2) / Math.max(0.05, c.depthPerPass)));
+    const margin = c.throughMargin ?? cfg.drill.throughMargin ?? 0.2;
+    const passes = Math.max(1, Math.ceil((cfg.material.thickness + margin) / Math.max(0.05, c.depthPerPass)));
     let L = 0;
     for (const loop of outlineGen.loops) { for (let i = 1; i < loop.pts.length; i++) L += Math.hypot(loop.pts[i].x - loop.pts[i - 1].x, loop.pts[i].y - loop.pts[i - 1].y); }
     byOp.outline = (L * passes / Math.max(1, c.feedXY)) * 60 + outlineGen.loops.length * passes * 2;
@@ -278,12 +389,13 @@ function estimateTimes({ iso, drillGroupsSorted, outlineGen, silkStrokes, laserO
   return { byOp, total };
 }
 
-function buildPreview({ origin, board, copperPolys, silkPolys, iso, drillGen, outlineGen, cfg, laserStrokes }) {
+function buildPreview({ origin, board, copperPolys, silkPolys, iso, drillGen, outlineGen, cfg, laserStrokes, clearingPaths }) {
   const tx = (x, y) => [round(x - origin.x), round(y - origin.y)];
   const copper = copperPolys.map((ring) => ring.map(([x, y]) => tx(x, y)));
   const silk = (silkPolys || []).map((ring) => ring.map(([x, y]) => tx(x, y)));
   const laser = (laserStrokes || []).map((line) => line.map(([x, y]) => tx(x, y)));
   const isolation = iso.passes.map((pass) => pass.rings.map((ring) => ring.map(([x, y]) => tx(x, y))));
+  const clearing = (clearingPaths || []).map((ring) => ring.map(([x, y]) => tx(x, y)));
   const drills = [];
   for (const g of drillGen.groups) {
     for (const [x, y] of g.holes) {
@@ -298,7 +410,7 @@ function buildPreview({ origin, board, copperPolys, silkPolys, iso, drillGen, ou
       return { x, y, tab: !!p.tab };
     }),
   }));
-  return { board, thickness: cfg.material.thickness, copper, silk, laser, isolation, drills, outline };
+  return { board, thickness: cfg.material.thickness, copper, silk, laser, isolation, clearing, drills, outline };
 }
 
 function round(v) {

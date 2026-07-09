@@ -2,6 +2,7 @@
 
 import { offsetClosed, outerContourCount, boundingBox } from '../geometry/clipper.js';
 import { isolationToolWidth } from '../config.js';
+import { boardFitsStock } from '../../web/public/stock-fit.js';
 
 // Estimate the smallest copper-to-copper gap by growing the copper outward and
 // finding the offset at which two separate islands first merge. Merges are
@@ -51,21 +52,39 @@ export function runChecks({ copperPolys, drill, outline, cfg, boardBounds }) {
     add('warn', `Copper forms a single connected island (${islands}); no isolation gap to measure. Check the layer selection.`);
   }
 
-  // Board vs. stock size.
+  // Board vs. stock size (Makera anchor-1 placement: the X15/Y10 work offset
+  // skips the L-bracket arms, so the work origin sits AT the blank's corner)
+  // — SHARED logic with the material-tab preview (web/public/stock-fit.js).
   if (boardBounds) {
     const w = boardBounds.maxX - boardBounds.minX;
     const h = boardBounds.maxY - boardBounds.minY;
     const stock = cfg.stock;
     if (stock && stock.sizeX && stock.sizeY) {
-      const margin = 4; // mm clamping margin recommendation
-      // The board can sit in either orientation on the blank.
-      const fits =
-        (w + margin <= stock.sizeX && h + margin <= stock.sizeY) ||
-        (h + margin <= stock.sizeX && w + margin <= stock.sizeY);
-      if (fits) {
-        add('ok', `Board ${w.toFixed(1)} × ${h.toFixed(1)} mm passt auf den Rohling ${stock.sizeX} × ${stock.sizeY} mm (inkl. ~${margin} mm Spannrand).`);
+      // Placement offset (drag & drop): the board sits offset mm away from the
+      // blank corner, which eats into the available room right/top.
+      const offset = {
+        x: Math.max(0, Number(cfg.placement?.offsetX) || 0),
+        y: Math.max(0, Number(cfg.placement?.offsetY) || 0),
+      };
+      const fit = boardFitsStock(w, h, stock.sizeX, stock.sizeY, { offset });
+      const { margin } = fit;
+      const offStr = (offset.x || offset.y) ? ` + Versatz X${offset.x}/Y${offset.y}` : '';
+      if (fit.fits) {
+        add(
+          'ok',
+          `Board ${w.toFixed(1)} × ${h.toFixed(1)} mm passt auf den Rohling ${stock.sizeX} × ${stock.sizeY} mm (benötigt ${fit.requiredX.toFixed(1)} × ${fit.requiredY.toFixed(1)} mm: Board ab Rohling-Ecke = Anker 1 + X15/Y10${offStr}, inkl. ~${margin} mm Klemm-Rand rechts/oben).`,
+        );
       } else {
-        add('error', `Board ${w.toFixed(1)} × ${h.toFixed(1)} mm passt NICHT auf den gewählten Rohling ${stock.sizeX} × ${stock.sizeY} mm (mit ~${margin} mm Spannrand). Größeren Rohling wählen.`);
+        add(
+          'error',
+          `Board ${w.toFixed(1)} × ${h.toFixed(1)} mm passt NICHT auf den gewählten Rohling ${stock.sizeX} × ${stock.sizeY} mm (benötigt ${fit.requiredX.toFixed(1)} × ${fit.requiredY.toFixed(1)} mm: Board ab Rohling-Ecke${offStr} + ~${margin} mm Klemm-Rand rechts/oben). ${(offset.x || offset.y) ? 'Versatz verkleinern oder größeren Rohling wählen.' : 'Größeren Rohling wählen.'}`,
+        );
+      }
+      if (stock.sides === 'double') {
+        add(
+          'warn',
+          'Doppelseitiger Rohling gewählt — makera-pcb fräst nur F.Cu (einseitig, kein Spiegeln von B.Cu).',
+        );
       }
     } else {
       add('ok', `Board ≈ ${w.toFixed(2)} × ${h.toFixed(2)} mm. Rohling muss größer sein (Spannrand einplanen).`);

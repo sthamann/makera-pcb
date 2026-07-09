@@ -47,3 +47,37 @@ M30
   // metric 3.3 implied decimals -> 9.0 / -16.0
   assert.deepEqual(r.drills[0].holes[0], { x: 9, y: -16 });
 });
+
+test('G85 slot is parsed as a slot without a drill hit at the start', () => {
+  const g = `M48
+METRIC
+T1C1.000
+%
+G90
+T1
+X10.0Y5.0G85X20.0Y5.0
+M30
+`;
+  const r = parseExcellon(g);
+  assert.equal(r.drills[0].holes.length, 0);
+  assert.equal(r.drills[0].slots.length, 1);
+  assert.deepEqual(r.drills[0].slots[0], { x1: 10, y1: 5, x2: 20, y2: 5 });
+});
+
+test('routed slot G00 approach does not create a spurious drill hole', () => {
+  const g = `M48
+METRIC
+T1C1.000
+%
+G90
+T1
+G00X5.0Y5.0
+M15
+G01X15.0Y5.0
+M16
+M30
+`;
+  const r = parseExcellon(g);
+  assert.equal(r.drills[0].holes.length, 0);
+  assert.equal(r.drills[0].slots.length, 1);
+});

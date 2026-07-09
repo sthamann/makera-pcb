@@ -48,9 +48,9 @@ PCB ISOLATION MILLING LOGIC:
 - Drilling depth = material thickness + small margin so it breaks through.
 
 CONFIG FIELD SEMANTICS (do not misread these):
-- safeZ = HIGH rapid clearance above the stock (e.g. 5 mm).
-- travelZ = LOW hop height between nearby features; it MUST be LESS than safeZ and
-  just above the surface (e.g. 1-2 mm). travelZ < safeZ is CORRECT.
+- safeZ = HIGH rapid clearance above the stock and top clamps (e.g. 12 mm on Carvera Air).
+- travelZ = LOW hop height between nearby features on the same board; it MUST be
+  LESS than safeZ and just above the surface (e.g. 2 mm). travelZ < safeZ is CORRECT.
 - isolation.tipWidth = V-bit flat tip width (mm); isolation.vbitAngleDeg = included
   angle; effective width = tipWidth + 2*cutDepth*tan(angle/2).
 - overlap = fraction of tool width overlapped between isolation passes (0..0.9).
@@ -65,9 +65,9 @@ const SCHEMA_HINT = `Config schema (only include keys you actually want to chang
                  "endmillDiameter": number, "cutDepth": number, "passes": int,
                  "overlap": 0..0.9, "feedXY": number, "plungeFeed": number, "rpm": number },
   "drill": { "throughMargin": number, "peck": number, "plungeFeed": number, "rpm": number },
-  "outline": { "cutterDiameter": number, "depthPerPass": number, "feedXY": number,
-               "plungeFeed": number, "rpm": number, "tabs": int, "tabWidth": number,
-               "tabHeight": number, "offsetSide": "outside"|"on"|"inside" },
+  "outline": { "cutterDiameter": number, "depthPerPass": number, "throughMargin": number,
+               "feedXY": number, "plungeFeed": number, "rpm": number, "tabs": int,
+               "tabWidth": number, "tabHeight": number, "offsetSide": "outside"|"on"|"inside" },
   "laser": { "enable": bool, "power": 0..1, "feedXY": number, "passes": int }
 }`;
 
@@ -165,6 +165,77 @@ async function chatCompletion({ apiKey, model, messages }) {
     if (res.status !== 400) break; // 401/403/429/5xx: don't retry variants
   }
   throw new Error(lastErr);
+}
+
+// --- machine-log diagnosis --------------------------------------------------
+// Build a prompt that turns the Carvera's send/receive log + the current job into
+// a plain-language diagnosis and concrete next steps / G-code to try.
+const MACHINE_CODES = `CARVERA / CARVERA AIR CONTROL CODES the operator can send:
+- M6 T0 = full tool change to the wireless probe (ATC). M6 T-1 = drop tool. M6 T1..T6 = a tool.
+- M493.2 T0 = SET the current tool NUMBER to the probe WITHOUT any ATC/movement
+  (use when the tool number is wrong, e.g. stuck at T6 while the probe is in).
+- "ATC already begun" = a tool-change (ATC) is stuck/mid-cycle → send a Reset
+  (Ctrl-X / realtime 0x18) to abort, then retry. Homing ($H / M490) may be needed.
+- M495 X.. Y.. C.. D.. O0 A.. B.. I.. J.. H2 P1 = combined Scan-Margin + Z-probe +
+  Auto-Leveling (needs the probe as the active tool = T0, else it prints
+  "Change to probe tool first!").
+- $H home, $X unlock (clear alarm), G10 L20 P0 X0 Y0 = set current pos as work origin,
+  M496.1 clearance, M496.2 goto work origin, M490.1/.2 collet close/open, M491 calibrate,
+  M370 clear height map, M375.1 show height map.
+- On the Air the probe is wireless (placed by hand): prefer M493.2 T0 to register it.`;
+
+export function buildDiagnoseMessages({ log, config, board, stats }) {
+  const tail = Array.isArray(log) ? log.slice(-60).join('\n') : String(log || '').split('\n').slice(-60).join('\n');
+  const context = {
+    board: board || null,
+    currentTool: stats?.tool ?? null,
+    isolationRings: stats?.isolationRings ?? null,
+    machine_log_tail: tail,
+    config: config || null,
+  };
+  const system =
+    'You are a Makera Carvera Air CNC support engineer. Read the machine send/receive ' +
+    'log and the current job, find the MOST LIKELY reason the operation is not working, ' +
+    'and give short, concrete next steps (and exact G-code to send when useful). Be ' +
+    'specific to what the log actually shows; do not invent problems. Prefer the least ' +
+    'destructive fix. Use ONLY these facts:\n\n' + KNOWLEDGE + '\n\n' + MACHINE_CODES +
+    '\n\nReturn STRICT JSON only: {"summary": string, "cause": string, "fixSteps": ' +
+    '[string], "commands": [string]} — commands are raw G/M-code lines the operator can ' +
+    'send (may be empty). Keep it concise.';
+  const user =
+    'Diagnose this Carvera Air situation and tell me how to fix it:\n\n' +
+    JSON.stringify(context, null, 2);
+  return [
+    { role: 'system', content: system },
+    { role: 'user', content: user },
+  ];
+}
+
+export function parseDiagnose(text) {
+  if (!text) throw new Error('empty AI response');
+  let s = text.trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) s = fence[1].trim();
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start < 0 || end < 0) throw new Error('no JSON object in AI response');
+  const obj = JSON.parse(s.slice(start, end + 1));
+  return {
+    summary: typeof obj.summary === 'string' ? obj.summary : '',
+    cause: typeof obj.cause === 'string' ? obj.cause : '',
+    fixSteps: Array.isArray(obj.fixSteps) ? obj.fixSteps.filter((x) => typeof x === 'string') : [],
+    commands: Array.isArray(obj.commands) ? obj.commands.filter((x) => typeof x === 'string') : [],
+  };
+}
+
+export async function diagnoseLog({ apiKey, model, log, config, board, stats }) {
+  if (!apiKey) throw new Error('OpenAI API key required');
+  const messages = buildDiagnoseMessages({ log, config, board, stats });
+  const data = await chatCompletion({ apiKey, model: model || 'gpt-5.5', messages });
+  const content = data?.choices?.[0]?.message?.content || '';
+  const out = parseDiagnose(content);
+  out.model = model || 'gpt-5.5';
+  return out;
 }
 
 export async function reviewConfig({ apiKey, model, config, board, checks, operations, stats }) {

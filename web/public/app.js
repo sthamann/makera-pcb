@@ -2,6 +2,50 @@
 // the core 2D workflow never depends on it.
 
 import { t, applyI18n, getLang, setLang } from './i18n.js';
+import {
+  ANCHOR1_OFFSET,
+  gotoWorkXYCommands,
+  gotoWorkOriginCommands,
+  gotoAnchor1Command,
+  setOriginAtAnchorOffsetCommands,
+  anchor1Readiness,
+  originIsSet,
+  notHomedFromStatus,
+  levelingGrid,
+  zProbeCommand,
+  scanMarginCommand,
+  autoLevelCommand,
+  configAndRunCommand,
+  insertProbeCommand,
+  VACUUM_ON_COMMAND,
+  VACUUM_OFF_COMMAND,
+  VACUUM_LINGER_DEFAULT_S,
+} from './machine-commands.js';
+import {
+  LEVELING_MAX_DEV_WARN_MM,
+  parseLevelingFromLog,
+  assessHeightMap,
+  drawHeightMap2D,
+} from './height-map.js';
+import { SETUP_PLACED_KEY, resetProjectScopedState } from './project-reset.js';
+import {
+  boardFitsStock,
+  smallestFittingStock,
+  snapPlacement,
+  clampPlacementOffset,
+  BOARD_INSET_ON_STOCK,
+  BRACKET_ARM_MM,
+  BRACKET_ARM_LENGTH_MM,
+} from './stock-fit.js';
+import {
+  JobMonitor,
+  JOB_STATE,
+  RESUME_TOOL_CHANGE_COMMAND,
+  ABORT_JOB_COMMANDS,
+  isToolChangeWait,
+  toolChangeTarget,
+  planVacuumForTransition,
+} from './job-monitor.js';
 
 // Makera standard PCB blanks (FR4 1.5 mm) + generic/custom options.
 const MATERIAL_PRESETS = [
@@ -85,7 +129,7 @@ const state = {
   result: null,
   view: '2d',
   viewer3d: null,
-  layers: { copper: true, silk: true, isolation: true, drills: true, outline: true, laser: true, stock: true },
+  layers: { copper: true, silk: true, isolation: true, clearing: true, drills: true, outline: true, laser: true, stock: true },
   tools: loadTools(),
   assignment: loadJSON('makera_assignment', {}),
   conns: loadJSON('makera_conns', []),
@@ -93,7 +137,7 @@ const state = {
   demo: { playing: false, raf: null },
   aiHasServerKey: false,
   aiLastHash: null,
-  fab: { steps: [], done: {}, active: null, dry: {}, view: null, anim: { raf: null, playing: false } },
+  fab: { steps: [], done: {}, active: null, dry: {}, view: null, anim: { raf: null, playing: false }, job: null },
   projectLog: [],
 };
 
@@ -293,6 +337,10 @@ function fabPlanText() {
   out.push('');
   out.push(`${t('info.board')}: ${b.width.toFixed(2)} × ${b.height.toFixed(2)} mm`);
   if (r.times?.total != null) out.push(`Σ ≈ ${fmtDur(r.times.total)} · ${t('fab.stepsShort', { n: steps.length })}`);
+  const place = activePlacement();
+  if (place.x || place.y) out.push(t('fab.placementNote', { x: place.x, y: place.y }));
+  const vs = vacuumSettings();
+  if (vs.enable) out.push(t('fab.vacuumNote', { linger: vs.lingerSec }));
   out.push('');
   steps.forEach((s, i) => {
     out.push(`## ${i + 1}. ${s.title}`);
@@ -342,6 +390,9 @@ function opTitle(op) {
   if (op.id === 'isolation') return t('op.isolation');
   if (op.id.startsWith('drill')) return t('op.drill', { dia: op.diameter.toFixed(2) });
   if (op.id === 'outline') return t('op.outline');
+  if (op.id === 'clearing') return t('op.clearing');
+  if (op.id === 'maskRemove') return t('op.maskRemove');
+  if (op.id === 'laser') return t('op.laser');
   return op.title || op.id;
 }
 // Drop/repair assignments that point to a missing tool or the WRONG tool type
@@ -398,7 +449,12 @@ function renderAssignments() {
       const tool = cur != null ? state.tools.find((x) => x.number === cur) : null;
       const mismatch = tool && op.toolType === 'drill' && Math.abs(tool.diameter - op.diameter) > 0.05
         ? `<span class="assign-warn" title="${t('tools.mismatchTitle')}">${t('tools.mismatch', { tool: tool.diameter, op: op.diameter.toFixed(2) })}</span>` : '';
-      return `<div class="assign-row${un}"><span>${escapeHtml(opTitle(op))} <span class="meta">(${op.toolType} ${op.diameter.toFixed(2)}mm)</span></span>
+      // Steps that run OUTSIDE the combined spindle job get a visible badge
+      // (laser = own program, mask removal = guided manual step).
+      const sep = op.separate
+        ? ` <span class="assign-sep" title="${t(op.id === 'laser' ? 'tools.sepLaserTitle' : 'tools.sepManualTitle')}">${t(op.id === 'laser' ? 'tools.sepLaser' : 'tools.sepManual')}</span>`
+        : '';
+      return `<div class="assign-row${un}"><span>${escapeHtml(opTitle(op))} <span class="meta">(${op.toolType} ${op.diameter.toFixed(2)}mm)</span>${sep}</span>
         <select data-op="${op.id}"><option value="">${t('tools.none')}</option>${opts(cur)}</select>${mismatch}</div>`;
     }).join('');
   $('#autoAssign', box).addEventListener('click', autoAssign);
@@ -431,9 +487,43 @@ function stockDims() {
   if (sx > 0 && sy > 0) return { sizeX: sx, sizeY: sy };
   return null;
 }
+
+// ---------- board placement on the blank (drag & drop) ----------
+// The offset lives in the two data-path inputs (placement.offsetX/Y): they
+// feed readConfig() → the pipeline (the ONE insertion point is the shifted
+// G-code work origin in src/pipeline.js), the project snapshot persists them
+// and every change re-generates automatically.
+function placementOffset() {
+  return {
+    x: Math.max(0, Number($('#placeOffX')?.value) || 0),
+    y: Math.max(0, Number($('#placeOffY')?.value) || 0),
+  };
+}
+// The placement the CURRENT result was generated with — machine commands
+// (scan margin / leveling / Z-probe) must match the generated G-code, not a
+// possibly newer input value that hasn't been re-generated yet.
+function activePlacement() {
+  const p = state.result?.placement;
+  return { x: Math.max(0, Number(p?.x) || 0), y: Math.max(0, Number(p?.y) || 0) };
+}
+function setPlacementOffset(x, y) {
+  const ox = $('#placeOffX');
+  const oy = $('#placeOffY');
+  if (ox) ox.value = String(x);
+  if (oy) oy.value = String(y);
+}
+// Snap to the 0.5 mm grid and keep the board (incl. clamp margin) on the blank.
+function normalizePlacement(x, y) {
+  let nx = snapPlacement(x);
+  let ny = snapPlacement(y);
+  const b = state.result?.board;
+  const stock = stockDims();
+  if (b && stock) ({ x: nx, y: ny } = clampPlacementOffset(b.width, b.height, stock.sizeX, stock.sizeY, nx, ny));
+  return { x: nx, y: ny };
+}
 // Fit an arbitrary extent {minX,minY,maxX,maxY} (mm) into a canvas; returns a
 // transform. Y is flipped so +Y points up.
-function fitScene(canvas, ext, maxH = 460) {
+function fitScene(canvas, ext, maxH = 460, view = null) {
   const wrap = canvas.parentElement;
   const dpr = window.devicePixelRatio || 1;
   const margin = 16;
@@ -449,22 +539,36 @@ function fitScene(canvas, ext, maxH = 460) {
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssW, cssH);
+  // Optional user zoom/pan (2D preview only). eff = fit scale × zoom; pan in px.
+  const z = view && view.zoom ? view.zoom : 1;
+  const px = view ? (view.panX || 0) : 0;
+  const py = view ? (view.panY || 0) : 0;
+  const eff = scale * z;
+  const X = (x) => margin + (x - ext.minX) * eff + px;
+  const Y = (y) => cssH - margin - (y - ext.minY) * eff + py;
   return {
-    ctx, scale, cssW, cssH,
-    X: (x) => margin + (x - ext.minX) * scale,
-    Y: (y) => cssH - margin - (y - ext.minY) * scale,
+    ctx, scale: eff, baseScale: scale, cssW, cssH, margin, ext,
+    X, Y,
+    // inverse: screen (css px) → world (mm)
+    invX: (sx) => (sx - margin - px) / eff + ext.minX,
+    invY: (sy) => ext.minY + (cssH - margin - (sy - py)) / eff,
   };
 }
 
-// Board placement offset on the stock (centred), + scene extent (union).
+// Board placement offset on the stock + scene extent (union). The Makera
+// X15/Y10 work offset skips the L-bracket arms, so the work origin — and the
+// board's DEFAULT bottom-left corner — lands AT the blank's corner (BOARD_
+// INSET_ON_STOCK, see stock-fit.js). The user's drag & drop placement offset
+// shifts the board from there; the fit check uses the same numbers.
 function boardOnStock(board, stock) {
-  if (!stock) return { offX: 0, offY: 0, ext: { minX: 0, minY: 0, maxX: board.width, maxY: board.height } };
-  const offX = (stock.sizeX - board.width) / 2;
-  const offY = (stock.sizeY - board.height) / 2;
+  const place = placementOffset();
+  const offX = BOARD_INSET_ON_STOCK.x + place.x;
+  const offY = BOARD_INSET_ON_STOCK.y + place.y;
+  if (!stock) return { offX, offY, ext: { minX: 0, minY: 0, maxX: offX + board.width, maxY: offY + board.height } };
   return {
     offX, offY,
     ext: {
-      minX: Math.min(0, offX), minY: Math.min(0, offY),
+      minX: 0, minY: 0,
       maxX: Math.max(stock.sizeX, offX + board.width), maxY: Math.max(stock.sizeY, offY + board.height),
     },
   };
@@ -477,32 +581,141 @@ function drawMaterialPreview() {
   const stock = stockDims();
   const board = state.result ? state.result.preview.board : null;
   const info = $('#matInfo');
-  if (!stock && !board) { const c = canvas.getContext('2d'); c.clearRect(0, 0, canvas.width, canvas.height); if (info) info.textContent = ''; return; }
+  if (!stock && !board) {
+    const c = canvas.getContext('2d'); c.clearRect(0, 0, canvas.width, canvas.height);
+    if (info) info.textContent = '';
+    const w0 = $('#matWarn'); if (w0) { w0.classList.add('hidden'); w0.innerHTML = ''; }
+    return;
+  }
   const ext = stock ? boardOnStock(board || { width: 0, height: 0 }, stock).ext : { minX: 0, minY: 0, maxX: board.width, maxY: board.height };
+  if (stock) {
+    // show the L-bracket arms the blank rests against (anchor 1 sits at the
+    // arms' outer corner, BRACKET_ARM_MM outside the blank's corner)
+    ext.minX = -BRACKET_ARM_MM.x;
+    ext.minY = -BRACKET_ARM_MM.y;
+  }
   const v = fitScene(canvas, ext, 300);
   const { ctx, X, Y } = v;
   if (stock) {
+    const armLen = Math.min(BRACKET_ARM_LENGTH_MM, Math.min(stock.sizeX, stock.sizeY));
+    ctx.fillStyle = '#8a94a6';
+    // vertical arm (blank rests against its right edge at x = 0)
+    ctx.fillRect(X(-BRACKET_ARM_MM.x), Y(armLen - BRACKET_ARM_MM.y), BRACKET_ARM_MM.x * v.scale, armLen * v.scale);
+    // horizontal arm (blank rests on its top edge at y = 0)
+    ctx.fillRect(X(-BRACKET_ARM_MM.x), Y(0), (armLen + BRACKET_ARM_MM.x) * v.scale, BRACKET_ARM_MM.y * v.scale);
     ctx.fillStyle = 'rgba(189,160,106,0.9)';
     ctx.fillRect(X(0), Y(stock.sizeY), stock.sizeX * v.scale, stock.sizeY * v.scale);
     ctx.strokeStyle = '#7a6a45'; ctx.lineWidth = 1; ctx.strokeRect(X(0), Y(stock.sizeY), stock.sizeX * v.scale, stock.sizeY * v.scale);
   }
+  const warn = $('#matWarn');
   if (board) {
     const { offX, offY } = boardOnStock(board, stock);
+    const place = placementOffset();
     const p = state.result.preview;
     const BX = (x) => X(x + offX), BY = (y) => Y(y + offY);
-    // fit ok?
-    const fits = !stock || (board.width + 4 <= stock.sizeX && board.height + 4 <= stock.sizeY) || (board.height + 4 <= stock.sizeX && board.width + 4 <= stock.sizeY);
+    // Fit via the SHARED stock-fit logic (anchor offset + clamp margin +
+    // placement offset) — the same function the feasibility check uses.
+    const fit = stock
+      ? boardFitsStock(board.width, board.height, stock.sizeX, stock.sizeY, { offset: place })
+      : { fits: true };
+    // remember the transform + board rect for the drag & drop hit test
+    state._vMat = { v, offX, offY, board };
     // copper faint
     ctx.beginPath();
     for (const ring of p.copper) { ring.forEach(([x, y], i) => (i ? ctx.lineTo(BX(x), BY(y)) : ctx.moveTo(BX(x), BY(y)))); ctx.closePath(); }
     ctx.fillStyle = 'rgba(120,72,24,0.55)'; ctx.fill('evenodd');
-    // board outline
-    ctx.strokeStyle = fits ? '#2ecc71' : '#ff5a5a'; ctx.lineWidth = 1.5;
+    // board outline (red when it leaves the blank / clamp margin)
+    ctx.strokeStyle = fit.fits ? '#2ecc71' : '#ff5a5a'; ctx.lineWidth = 1.5;
     ctx.strokeRect(BX(0), BY(board.height), board.width * v.scale, board.height * v.scale);
-    if (info) info.innerHTML = `${t('mat.infoStock')} <b>${stock ? stock.sizeX + ' × ' + stock.sizeY : '—'} mm</b> · ${t('mat.infoBoard')} <b>${board.width.toFixed(1)} × ${board.height.toFixed(1)} mm</b> · ${fits ? `<span style="color:var(--ok)">${t('mat.fits')}</span>` : `<span style="color:var(--err)">${t('mat.notFits')}</span>`}`;
-  } else if (info) {
-    info.innerHTML = `${t('mat.infoStock')} <b>${stock.sizeX} × ${stock.sizeY} mm</b> ${t('mat.noBoard')}`;
+    // work origin marker: stays at the blank corner even when the board moves
+    ctx.strokeStyle = '#4c8dff'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(X(0), Y(0), 4, 0, 7); ctx.stroke();
+    const offStr = (place.x || place.y)
+      ? ` · ${t('mat.infoOffset')} <b>X ${place.x} / Y ${place.y} mm</b>`
+      : '';
+    if (info) info.innerHTML = `${t('mat.infoStock')} <b>${stock ? stock.sizeX + ' × ' + stock.sizeY : '—'} mm</b> · ${t('mat.infoBoard')} <b>${board.width.toFixed(1)} × ${board.height.toFixed(1)} mm</b>${offStr} · ${fit.fits ? `<span style="color:var(--ok)">${t('mat.fits')}</span>` : `<span style="color:var(--err)">${t('mat.notFits')}</span>`}`;
+    if (warn) {
+      if (stock && !fit.fits) {
+        const alt = smallestFittingStock(board.width, board.height, MATERIAL_PRESETS, { offset: place });
+        const hint = alt
+          ? t('mat.fitHintStock', { label: alt.label })
+          : t('mat.fitHintNone');
+        warn.classList.remove('hidden');
+        warn.innerHTML = `<b>⛔ ${t('mat.fitWarnTitle')}</b> ${t('mat.fitWarnBody', {
+          need: `${fit.requiredX.toFixed(1)} × ${fit.requiredY.toFixed(1)}`,
+          stock: `${stock.sizeX} × ${stock.sizeY}`,
+          margin: fit.margin,
+        })} ${(place.x || place.y) ? t('mat.fitWarnOffset', { x: place.x, y: place.y }) : ''} ${hint}`;
+      } else {
+        warn.classList.add('hidden');
+        warn.innerHTML = '';
+      }
+    }
+  } else {
+    state._vMat = null;
+    if (info) info.innerHTML = `${t('mat.infoStock')} <b>${stock.sizeX} × ${stock.sizeY} mm</b> ${t('mat.noBoard')}`;
+    if (warn) { warn.classList.add('hidden'); warn.innerHTML = ''; }
   }
+}
+
+// ---------- material preview: board drag & drop ----------
+// Grab the board in the blank preview and drag it (mouse + touch, pointer
+// events). Snaps to the 0.5 mm grid, clamps to the blank incl. clamp margin,
+// re-runs the fit check live on every move and regenerates on release.
+function bindMaterialDrag() {
+  const cv = $('#matCanvas');
+  if (!cv) return;
+  let dragging = false;
+  let grab = { x: 0, y: 0 }; // grab point inside the board, in mm
+  const worldPos = (e) => {
+    const m = state._vMat;
+    if (!m) return null;
+    const rect = cv.getBoundingClientRect();
+    return { x: m.v.invX(e.clientX - rect.left), y: m.v.invY(e.clientY - rect.top) };
+  };
+  const overBoard = (p) => {
+    const m = state._vMat;
+    return !!(m && p
+      && p.x >= m.offX && p.x <= m.offX + m.board.width
+      && p.y >= m.offY && p.y <= m.offY + m.board.height);
+  };
+  cv.addEventListener('pointerdown', (e) => {
+    const m = state._vMat;
+    const p = worldPos(e);
+    if (!m || !p || !overBoard(p)) return;
+    dragging = true;
+    grab = { x: p.x - m.offX, y: p.y - m.offY };
+    cv.classList.add('board-drag');
+    try { cv.setPointerCapture?.(e.pointerId); } catch { /* synthetic events have no active pointer */ }
+    e.preventDefault();
+  });
+  cv.addEventListener('pointermove', (e) => {
+    const m = state._vMat;
+    if (!m) return;
+    const p = worldPos(e);
+    if (!dragging) {
+      cv.classList.toggle('board-grab', overBoard(p));
+      return;
+    }
+    if (!p) return;
+    // new bottom-left corner = pointer − grab point − fixed inset
+    const next = normalizePlacement(
+      p.x - grab.x - BOARD_INSET_ON_STOCK.x,
+      p.y - grab.y - BOARD_INSET_ON_STOCK.y,
+    );
+    const cur = placementOffset();
+    if (next.x === cur.x && next.y === cur.y) return;
+    setPlacementOffset(next.x, next.y);
+    drawMaterialPreview(); // live feedback: position, fit colour, warning
+  });
+  const endDrag = () => {
+    if (!dragging) return;
+    dragging = false;
+    cv.classList.remove('board-drag');
+    scheduleGenerate(); // offset is final — regenerate G-code/checks/report
+  };
+  cv.addEventListener('pointerup', endDrag);
+  cv.addEventListener('pointercancel', endDrag);
 }
 
 function drawPreview() {
@@ -511,7 +724,9 @@ function drawPreview() {
   const board = p.board;
   const stock = state.layers.stock ? stockDims() : null;
   const { offX, offY, ext } = boardOnStock(board, stock);
-  const v = fitScene(canvas, ext, 460);
+  state.view2d = state.view2d || { zoom: 1, panX: 0, panY: 0, measure: false, mpts: [] };
+  const v = fitScene(canvas, ext, 460, state.view2d);
+  state._v2d = v;
   const { ctx } = v;
   // Stock coords for the blank; board content is offset onto its placement.
   const SX = v.X, SY = v.Y;
@@ -568,10 +783,95 @@ function drawPreview() {
     ctx.strokeStyle = 'rgba(255,89,216,0.95)'; ctx.lineWidth = 1;
     for (const line of p.laser) { ctx.beginPath(); line.forEach(([x, y], i) => (i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y)))); ctx.stroke(); }
   }
+  if (state.layers.clearing && p.clearing && p.clearing.length) {
+    ctx.strokeStyle = 'rgba(240,180,41,0.7)'; ctx.lineWidth = 1;
+    for (const ring of p.clearing) { ctx.beginPath(); ring.forEach(([x, y], i) => (i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y)))); ctx.closePath(); ctx.stroke(); }
+  }
   ctx.strokeStyle = '#8b98a9'; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(0) + 16, Y(0)); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(0), Y(0) - 16); ctx.stroke();
   ctx.fillStyle = '#8b98a9'; ctx.font = '10px sans-serif'; ctx.fillText('0,0', X(0) + 3, Y(0) - 4);
+  // measurement overlay (F): points/line in stock-space world coords
+  const mp = state.view2d.mpts || [];
+  if (mp.length) {
+    ctx.fillStyle = '#4c8dff'; ctx.strokeStyle = '#4c8dff'; ctx.lineWidth = 1.4;
+    for (const pt of mp) { ctx.beginPath(); ctx.arc(SX(pt.x), SY(pt.y), 3, 0, 7); ctx.fill(); }
+    if (mp.length >= 2) {
+      const a = mp[0]; const b = mp[1];
+      ctx.beginPath(); ctx.moveTo(SX(a.x), SY(a.y)); ctx.lineTo(SX(b.x), SY(b.y)); ctx.stroke();
+      const dx = b.x - a.x; const dy = b.y - a.y; const dist = Math.hypot(dx, dy);
+      const label = `${dist.toFixed(2)} mm  (Δx ${dx.toFixed(2)}, Δy ${dy.toFixed(2)})`;
+      const mx = (SX(a.x) + SX(b.x)) / 2; const my = (SY(a.y) + SY(b.y)) / 2;
+      ctx.font = '11px ui-monospace, Menlo, monospace';
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = 'rgba(11,17,28,0.9)'; ctx.fillRect(mx - tw / 2 - 5, my - 20, tw + 10, 16);
+      ctx.fillStyle = '#e6edf3'; ctx.fillText(label, mx - tw / 2, my - 8);
+    }
+  }
+}
+// ---------- 2D preview interaction (F): zoom / pan / measure ----------
+function fitPreview() {
+  state.view2d = { zoom: 1, panX: 0, panY: 0, measure: state.view2d?.measure || false, mpts: state.view2d?.mpts || [] };
+  if (state.result && state.view === '2d') drawPreview();
+}
+function toggleMeasure() {
+  state.view2d = state.view2d || { zoom: 1, panX: 0, panY: 0, measure: false, mpts: [] };
+  state.view2d.measure = !state.view2d.measure;
+  state.view2d.mpts = [];
+  const b = $('#pvMeasure'); if (b) b.classList.toggle('active', state.view2d.measure);
+  const cv = $('#preview'); if (cv) cv.style.cursor = state.view2d.measure ? 'crosshair' : '';
+  if (state.result && state.view === '2d') drawPreview();
+}
+function bindPreviewInteraction() {
+  const cv = $('#preview');
+  if (!cv) return;
+  cv.addEventListener('wheel', (e) => {
+    if (!state.result || state.view !== '2d') return;
+    e.preventDefault();
+    state.view2d = state.view2d || { zoom: 1, panX: 0, panY: 0, measure: false, mpts: [] };
+    const rect = cv.getBoundingClientRect();
+    const cx = e.clientX - rect.left; const cy = e.clientY - rect.top;
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const nz = Math.max(1, Math.min(40, state.view2d.zoom * factor));
+    const ratio = nz / state.view2d.zoom;
+    // keep the point under the cursor stationary
+    state.view2d.panX = cx - (cx - state.view2d.panX) * ratio;
+    state.view2d.panY = cy - (cy - state.view2d.panY) * ratio;
+    state.view2d.zoom = nz;
+    if (nz === 1) { state.view2d.panX = 0; state.view2d.panY = 0; }
+    drawPreview();
+  }, { passive: false });
+  let dragging = false; let lastX = 0; let lastY = 0; let moved = false;
+  cv.addEventListener('pointerdown', (e) => {
+    if (!state.result || state.view !== '2d') return;
+    dragging = true; moved = false; lastX = e.clientX; lastY = e.clientY;
+    cv.setPointerCapture?.(e.pointerId);
+  });
+  cv.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - lastX; const dy = e.clientY - lastY;
+    if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
+    lastX = e.clientX; lastY = e.clientY;
+    state.view2d = state.view2d || { zoom: 1, panX: 0, panY: 0 };
+    state.view2d.panX += dx; state.view2d.panY += dy;
+    drawPreview();
+  });
+  const endDrag = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    // a click (no drag) while measuring records a point
+    if (!moved && state.view2d?.measure && state._v2d) {
+      const rect = cv.getBoundingClientRect();
+      const wx = state._v2d.invX(e.clientX - rect.left);
+      const wy = state._v2d.invY(e.clientY - rect.top);
+      const mp = state.view2d.mpts || [];
+      if (mp.length >= 2) state.view2d.mpts = [{ x: wx, y: wy }];
+      else state.view2d.mpts = [...mp, { x: wx, y: wy }];
+      drawPreview();
+    }
+  };
+  cv.addEventListener('pointerup', endDrag);
+  cv.addEventListener('pointercancel', () => { dragging = false; });
 }
 
 // ---------- 3D ----------
@@ -665,18 +965,27 @@ function buildFabSteps() {
   // Preparation & safety, ordered like the Makera "Config and Run": wired probe
   // (margin/Z/leveling) first, cutting tool only afterwards.
   steps.push({ id: 'fixate', kind: 'manual', title: t('step.fixate.t'), instr: t('step.fixate.i') });
-  steps.push({ id: 'setOrigin', kind: 'setup', action: 'setOriginXY', title: t('step.setOrigin.t'), instr: t('step.setOrigin.i') });
+  // Primary action = one-click anchor-1 origin (M496.3 + X15/Y10 + G10 L20),
+  // matching the diagram; freely-placed boards use jog + "set origin (XYZ)".
+  steps.push({ id: 'setOrigin', kind: 'setup', action: 'setOriginAnchor1', title: t('step.setOrigin.t'), instr: t('step.setOrigin.i') });
   steps.push({ id: 'insertProbe', kind: 'setup', action: 'probeIn', title: t('step.insertProbe.t'), instr: t('step.insertProbe.i') });
   steps.push({ id: 'autoSetup', kind: 'setup', action: 'autoSetup', title: t('step.autoSetup.t'), instr: t('step.autoSetup.i') });
   steps.push({ id: 'insertTool', kind: 'manual', title: t('step.insertTool.t'), tool: isoTool, instr: t('step.insertTool.i') });
 
   steps.push({ id: 'isolation', kind: 'mill', title: t('step.isolation.t'), tool: isoTool, file: files['1_isolation.nc'] ? Object.keys(files).find((f) => f.startsWith('1_')) : null, est: times.isolation });
 
+  // Optional copper clearing directly after isolation (same order as the
+  // generated files and the report: 1_isolation.nc → 1b_clearing.nc).
+  const clearingFile = Object.keys(files).find((f) => f.includes('clearing'));
+  if (clearingFile) {
+    steps.push({ id: 'clearing', kind: 'mill', title: t('step.clearing.t'), tool: toolLabelFor('clearing'), file: clearingFile, est: times.clearing });
+  }
+
   if (cfg.solderMask?.enable) {
     steps.push({ id: 'clean', kind: 'manual', title: t('step.clean.t'), instr: t('step.clean.i') });
     steps.push({ id: 'applyMask', kind: 'manual', title: t('step.applyMask.t'), instr: t('step.applyMask.i') });
     steps.push({ id: 'cureMask', kind: 'dry', title: t('step.cureMask.t'), instr: t('step.cureMask.i'), dryMin: 10 });
-    steps.push({ id: 'removeMask', kind: 'manual', title: t('step.removeMask.t'), tool: t('step.removeMask.tool'), instr: t('step.removeMask.i') });
+    steps.push({ id: 'removeMask', kind: 'manual', title: t('step.removeMask.t'), tool: toolLabelFor('maskRemove') || t('step.removeMask.tool'), instr: t('step.removeMask.i') });
   }
   for (const g of r.stats.drillGroups) {
     const id = `drill:${g.diameter.toFixed(2)}`;
@@ -689,7 +998,7 @@ function buildFabSteps() {
   }
   const laserFile = Object.keys(files).find((f) => f.includes('silkscreen_laser'));
   if (laserFile) {
-    steps.push({ id: 'laser', kind: 'mill', title: t('step.laser.t'), tool: t('step.laser.tool'), file: laserFile, est: times.laser });
+    steps.push({ id: 'laser', kind: 'mill', title: t('step.laser.t'), tool: toolLabelFor('laser') || t('step.laser.tool'), file: laserFile, est: times.laser });
   }
   steps.push({ id: 'finish', kind: 'manual', title: t('step.finish.t'), instr: t('step.finish.i') });
   return steps;
@@ -702,7 +1011,7 @@ function buildFabSteps() {
 const AIRW = 300, AIRH = 200, PX = 52, PY = 20;
 const asx = (mm) => PX + mm;
 const asy = (mm) => PY + (AIRH - mm);
-const WOFF = { x: 15, y: 10 }; // Makera LED-example work offset from anchor 1
+const WOFF = ANCHOR1_OFFSET; // Makera work offset from anchor 1 (X15/Y10)
 
 function figBoard() {
   const b = state.result?.board;
@@ -718,16 +1027,19 @@ function bedBase(holes = true) {
   if (holes) for (let x = 20; x <= AIRW - 20; x += 40) for (let y = 20; y <= AIRH - 20; y += 40)
     dots += `<circle cx="${asx(x)}" cy="${asy(y)}" r="1.5" fill="#3a465c"/>`;
   const bed = `<rect x="${asx(0)}" y="${asy(AIRH)}" width="${AIRW}" height="${AIRH}" rx="7" fill="#212a3b" stroke="#3d4a63"/>`;
-  // L-bracket at anchor 1 (front-left): vertical + horizontal arm with the real
-  // mounting pattern — 2 dowel pins (filled) + 3 M5 screws (rings).
+  // L-bracket at anchor 1 (front-left) with REAL arm widths (firmware
+  // coordinate.anchor_width): 15 mm in X / 10 mm in Y, ~100 mm long — the
+  // board at the X15/Y10 offset sits exactly flush against these arms.
+  // Mounting pattern: 2 dowel pins (filled) + 3 M5 screws (rings).
+  const armX = BRACKET_ARM_MM.x, armY = BRACKET_ARM_MM.y, armLen = BRACKET_ARM_LENGTH_MM;
   const lbracket =
-    `<rect x="${asx(0)}" y="${asy(80)}" width="7" height="80" fill="#8a94a6"/>` +
-    `<rect x="${asx(0)}" y="${asy(0) - 7}" width="80" height="7" fill="#8a94a6"/>` +
-    `<circle cx="${asx(3.5)}" cy="${asy(62)}" r="2" fill="#222a37"/>` +
-    `<circle cx="${asx(3.5)}" cy="${asy(38)}" r="2.6" fill="none" stroke="#222a37" stroke-width="1.3"/>` +
-    `<circle cx="${asx(3.5)}" cy="${asy(14)}" r="2.6" fill="none" stroke="#222a37" stroke-width="1.3"/>` +
-    `<circle cx="${asx(30)}" cy="${asy(3.5)}" r="2" fill="#222a37"/>` +
-    `<circle cx="${asx(58)}" cy="${asy(3.5)}" r="2.6" fill="none" stroke="#222a37" stroke-width="1.3"/>`;
+    `<rect x="${asx(0)}" y="${asy(armLen)}" width="${armX}" height="${armLen}" fill="#8a94a6"/>` +
+    `<rect x="${asx(0)}" y="${asy(armY)}" width="${armLen}" height="${armY}" fill="#8a94a6"/>` +
+    `<circle cx="${asx(armX / 2)}" cy="${asy(62)}" r="2" fill="#222a37"/>` +
+    `<circle cx="${asx(armX / 2)}" cy="${asy(38)}" r="2.6" fill="none" stroke="#222a37" stroke-width="1.3"/>` +
+    `<circle cx="${asx(armX / 2)}" cy="${asy(14)}" r="2.6" fill="none" stroke="#222a37" stroke-width="1.3"/>` +
+    `<circle cx="${asx(40)}" cy="${asy(armY / 2)}" r="2" fill="#222a37"/>` +
+    `<circle cx="${asx(70)}" cy="${asy(armY / 2)}" r="2.6" fill="none" stroke="#222a37" stroke-width="1.3"/>`;
   const axes =
     `<text x="${asx(2)}" y="${asy(0) + 16}" class="lbl gr">${t('dg.anchor')}</text>` +
     `<text x="${asx(AIRW) - 4}" y="${asy(0) + 16}" class="lbl dim" text-anchor="end">300 mm (X)</text>` +
@@ -763,16 +1075,28 @@ function pcbDims(b) {
     `<text x="${xr + 12}" y="${b.y + b.h / 2}" class="lbl blue" transform="rotate(-90 ${xr + 12} ${b.y + b.h / 2})" text-anchor="middle">${mm.h} mm</text>`;
   return s;
 }
+// Placement offset for the diagrams, clamped so the board stays drawable on
+// the 300×200 bed even for extreme values (display only — the real clamp is
+// the stock-fit rule).
+function figPlacement(w, h) {
+  const place = placementOffset();
+  return {
+    x: Math.max(0, Math.min(place.x, AIRW - WOFF.x - w)),
+    y: Math.max(0, Math.min(place.y, AIRH - WOFF.y - h)),
+  };
+}
 function boardRect(highlight) {
   const { w, h } = figBoard();
-  const x = asx(WOFF.x), y = asy(WOFF.y + h);
+  const place = figPlacement(w, h);
+  const x = asx(WOFF.x + place.x), y = asy(WOFF.y + place.y + h);
   return { w, h, x, y,
     svg: `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="2" fill="#c98a3a" stroke="${highlight || '#e0a84e'}" stroke-width="1.5"/>` };
 }
 function wasteRect() {
   const { w, h } = figBoard();
+  const place = figPlacement(w, h);
   const m = 12; // ~waste board margin around the PCB (shapes only; labelled via legend)
-  return `<rect x="${asx(WOFF.x - m)}" y="${asy(WOFF.y + h + m)}" width="${w + 2 * m}" height="${h + 2 * m}" rx="3" fill="#8f6a3f" stroke="#a97f4c" stroke-dasharray="4 3"/>`;
+  return `<rect x="${asx(WOFF.x + place.x - m)}" y="${asy(WOFF.y + place.y + h + m)}" width="${w + 2 * m}" height="${h + 2 * m}" rx="3" fill="#8f6a3f" stroke="#a97f4c" stroke-dasharray="4 3"/>`;
 }
 // Two top clamps pressing the PCB down on the edges away from the L-bracket.
 function clamps() {
@@ -780,18 +1104,20 @@ function clamps() {
   const clamp = (cx) => `<rect x="${cx - 9}" y="${b.y - 7}" width="18" height="15" rx="3" fill="#48566e" stroke="#5b6b88"/>`;
   return clamp(b.x + b.w * 0.34) + clamp(b.x + b.w * 0.7);
 }
+// Arrows anchor 1 → WORK ORIGIN (X15/Y10). The origin does NOT follow the
+// board placement offset — the board may sit further up/right, the zero stays.
 function offsetArrows() {
-  const b = boardRect();
+  const ox = asx(WOFF.x), oy = asy(WOFF.y);
   const ax = asx(0), ay = asy(0);
-  return `<line x1="${ax}" y1="${ay + 12}" x2="${b.x}" y2="${ay + 12}" class="arr x"/>` +
-    `<text x="${(ax + b.x) / 2}" y="${ay + 24}" class="lbl blue" text-anchor="middle">X ${WOFF.x}</text>` +
-    `<line x1="${ax - 12}" y1="${ay}" x2="${ax - 12}" y2="${b.y + b.h}" class="arr y"/>` +
-    `<text x="${ax - 22}" y="${(ay + b.y + b.h) / 2}" class="lbl blue" text-anchor="middle" transform="rotate(-90 ${ax - 22} ${(ay + b.y + b.h) / 2})">Y ${WOFF.y}</text>`;
+  return `<line x1="${ax}" y1="${ay + 12}" x2="${ox}" y2="${ay + 12}" class="arr x"/>` +
+    `<text x="${(ax + ox) / 2}" y="${ay + 24}" class="lbl blue" text-anchor="middle">X ${WOFF.x}</text>` +
+    `<line x1="${ax - 12}" y1="${ay}" x2="${ax - 12}" y2="${oy}" class="arr y"/>` +
+    `<text x="${ax - 22}" y="${(ay + oy) / 2}" class="lbl blue" text-anchor="middle" transform="rotate(-90 ${ax - 22} ${(ay + oy) / 2})">Y ${WOFF.y}</text>`;
 }
 function originDot() {
-  const b = boardRect();
-  return `<circle cx="${b.x}" cy="${b.y + b.h}" r="5" fill="none" stroke="#4c8dff" stroke-width="2"/>` +
-    `<circle cx="${b.x}" cy="${b.y + b.h}" r="1.6" fill="#4c8dff"/>`;
+  const cx = asx(WOFF.x), cy = asy(WOFF.y);
+  return `<circle cx="${cx}" cy="${cy}" r="5" fill="none" stroke="#4c8dff" stroke-width="2"/>` +
+    `<circle cx="${cx}" cy="${cy}" r="1.6" fill="#4c8dff"/>`;
 }
 // Side-view layer stack explaining the waste board. Labels stay inside the
 // viewBox (no clipping) and the notes sit on their own lines.
@@ -864,7 +1190,7 @@ function stepDiagram(step) {
   if (id === 'insertProbe') return spindleSide('probe');
   if (id === 'setOrigin') {
     const inner = bedBase() + boardRect().svg + offsetArrows() + originDot() +
-      `<text x="${boardRect().x + 8}" y="${boardRect().y + boardRect().h + 20}" class="lbl blue">${t('dg.origin')}</text>`;
+      `<text x="${asx(WOFF.x) + 8}" y="${asy(WOFF.y) + 20}" class="lbl blue">${t('dg.origin')}</text>`;
     return svgWrap(inner);
   }
   if (id === 'probeZ') return spindleSide('probe');
@@ -915,6 +1241,10 @@ function stepDiagram(step) {
       feat = `<text x="${b.x + b.w / 2}" y="${b.y + b.h / 2 + 4}" class="lbl" text-anchor="middle" style="font-size:13px;fill:#fff">SILK</text>` +
         `<circle cx="${b.x + 14}" cy="${b.y + 14}" r="4" fill="#ff5a5a"/>` +
         `<text x="${b.x}" y="${b.y - 8}" class="lbl red">${t('dg.laser')}</text>`;
+    } else if (id === 'clearing') {
+      for (let i = 0; i < 6; i++)
+        feat += `<path d="M${b.x + 8} ${b.y + 8 + i * (b.h - 16) / 5} h ${b.w - 16}" stroke="#f0b429" stroke-width="2" opacity="0.7" fill="none"/>`;
+      feat += `<text x="${b.x}" y="${b.y - 8}" class="lbl yel">${t('dg.clearing')}</text>`;
     } else {
       for (let i = 0; i < 4; i++)
         feat += `<path d="M${b.x + 12} ${b.y + 12 + i * (b.h - 24) / 3} h ${b.w - 24}" stroke="#0d1017" stroke-width="3" fill="none"/>`;
@@ -939,6 +1269,143 @@ function stepDiagram(step) {
 function firstUndoneIdx() {
   return state.fab.steps.findIndex((s) => !state.fab.done[s.id]);
 }
+
+// ---------- external vacuum automation (app side) ----------
+// Settings live in the accessory panel (data-path inputs → readConfig feeds
+// the G-code path) and are mirrored to localStorage like the other settings.
+// The pure transition plan is in job-monitor.js (planVacuumForTransition);
+// this block only executes it: send now or schedule the run-on off.
+const VACUUM_SETTINGS_KEY = 'makera_vacuum';
+function vacuumSettings() {
+  const linger = Number($('#vacLinger')?.value);
+  return {
+    enable: $('#vacAuto')?.checked ?? true,
+    lingerSec: Number.isFinite(linger) && linger >= 0 ? linger : VACUUM_LINGER_DEFAULT_S,
+    pauseToolChange: $('#vacPauseTc')?.checked ?? false,
+    laser: $('#vacLaser')?.checked ?? true,
+  };
+}
+function saveVacuumSettings() { saveJSON(VACUUM_SETTINGS_KEY, vacuumSettings()); }
+function loadVacuumSettings() {
+  const s = loadJSON(VACUUM_SETTINGS_KEY, null);
+  if (!s) return;
+  if ($('#vacAuto')) $('#vacAuto').checked = s.enable !== false;
+  if ($('#vacLinger') && s.lingerSec != null) $('#vacLinger').value = s.lingerSec;
+  if ($('#vacPauseTc')) $('#vacPauseTc').checked = !!s.pauseToolChange;
+  if ($('#vacLaser')) $('#vacLaser').checked = s.laser !== false;
+}
+// 'command' jobs (M495 & co) never touch the vacuum; the laser program has
+// its own settings switch.
+function vacuumJobKind(name, mode) {
+  if (mode === 'command') return 'command';
+  return /laser/i.test(String(name || '')) ? 'laser' : 'mill';
+}
+let vacuumOffTimer = null;
+function cancelVacuumOffTimer() {
+  if (vacuumOffTimer) { clearTimeout(vacuumOffTimer); vacuumOffTimer = null; }
+}
+// Execute the plan for a batch of monitor events. The scheduled off (run-on)
+// is cancelled whenever the port is switched on again or a new job starts —
+// a stale timer must never kill the vacuum mid-job.
+function applyVacuumEvents(events, jobKind) {
+  for (const ev of events || []) {
+    if (ev.type !== 'state') continue;
+    const plan = planVacuumForTransition(ev, vacuumSettings(), jobKind);
+    if (!plan) continue;
+    if (plan.delayS > 0) {
+      cancelVacuumOffTimer();
+      vacuumOffTimer = setTimeout(() => {
+        vacuumOffTimer = null;
+        if (!state.machine.connected) return;
+        machineCommands(plan.commands);
+        logEvent('log.vacAutoOff', { s: plan.delayS });
+      }, plan.delayS * 1000);
+    } else {
+      if (plan.commands.includes(VACUUM_ON_COMMAND)) cancelVacuumOffTimer();
+      machineCommands(plan.commands);
+    }
+  }
+}
+
+// ---------- live job monitoring (state machine in job-monitor.js) ----------
+// One monitored job at a time: { monitor, stepId, name, failure }. The poll
+// loop feeds it status+log; DONE auto-completes the step and unlocks the
+// next one, FAILED shows the reason on the step and does NOT advance.
+function jobActive() {
+  return !!(state.fab.job && state.fab.job.monitor.active);
+}
+function startJobMonitor(stepId, name, mode) {
+  if (!state.machine.connected) return; // nothing to monitor without a link
+  const vacuumKind = vacuumJobKind(name, mode);
+  state.fab.job = { monitor: new JobMonitor({ mode }), stepId, name, vacuumKind };
+  const events = state.fab.job.monitor.start(name);
+  applyVacuumEvents(events, vacuumKind); // start → vacuum on (if automated)
+  renderFab();
+}
+// Steps are gated: running a step while earlier ones are still open needs an
+// explicit confirmation (deliberate skipping stays possible — nothing is
+// locked hard); a second start while a job runs is refused.
+function stepGateOk(idx) {
+  if (jobActive()) { toast(t('job.alreadyRunning'), true); return false; }
+  const activeIdx = firstUndoneIdx();
+  if (activeIdx >= 0 && idx != null && idx > activeIdx) return confirm(t('job.skipConfirm'));
+  return true;
+}
+function jobStateBadge(job) {
+  const st = job.monitor.state;
+  if (st === JOB_STATE.STARTING || st === JOB_STATE.RUNNING) {
+    return `<span class="job-badge run"><span class="spinner"></span>${t('job.running')}</span>`;
+  }
+  if (st === JOB_STATE.WAITING_TOOL) {
+    const n = job.monitor.targetTool;
+    return `<span class="job-badge wait"><span class="spinner"></span>${t('job.waitTool', { n: n != null ? n : '?' })}</span>`;
+  }
+  if (st === JOB_STATE.PAUSED) return `<span class="job-badge wait">${t('job.paused')}</span>`;
+  if (st === JOB_STATE.FAILED) {
+    const f = job.monitor.failure || {};
+    const detail = f.reason === 'alarm' ? t('job.failedAlarm', { msg: f.message || '' })
+      : f.reason === 'disconnected' ? t('job.failedDisconnected')
+      : f.reason === 'not-started' ? t('job.failedNotStarted')
+      : f.reason === 'cancelled' ? t('job.failedCancelled')
+      : '';
+    return `<span class="job-badge fail">✗ ${t('job.failed')}${detail ? ' – ' + escapeHtml(detail) : ''}</span>`;
+  }
+  return '';
+}
+// Title for toasts/logs: fabrication step title when the id matches a step,
+// otherwise the job name (device-control jobs like 'probeZ' have no step).
+function stepTitleById(id, fallback = null) {
+  const s = state.fab.steps.find((x) => x.id === id);
+  return s ? s.title : (fallback || id);
+}
+// Feed the monitor from the regular status poll and act on its transitions.
+function updateJobMonitorFromPoll(d, s) {
+  const job = state.fab.job;
+  if (!job) return;
+  if (!job.monitor.active) return;
+  const events = job.monitor.update({ connected: !!d.connected, status: s, log: d.log || [] });
+  // vacuum automation follows the job states (tool wait / done / failed)
+  applyVacuumEvents(events, job.vacuumKind || vacuumJobKind(job.name, job.monitor.mode));
+  for (const ev of events) {
+    if (ev.type !== 'state') continue;
+    if (ev.state === JOB_STATE.DONE) {
+      if (job.stepId) state.fab.done[job.stepId] = true;
+      const title = job.stepId ? stepTitleById(job.stepId, job.name) : (job.name || '');
+      toast(t('job.stepDone', { title }));
+      logEvent('log.stepDone', { title });
+      // Config & Run / auto-leveling finished → pull the height map from the
+      // machine log (the G32 output is already there — no extra command).
+      if (job.stepId === 'autoSetup' || job.stepId === 'levelMap') fetchHeightMap();
+    } else if (ev.state === JOB_STATE.FAILED) {
+      const title = job.stepId ? stepTitleById(job.stepId, job.name) : (job.name || '');
+      toast(t('job.stepFailed', { title }), true);
+      logEvent('log.stepFailed', { title, msg: job.monitor.failure?.message || job.monitor.failure?.reason || '' }, 'error');
+    } else if (ev.state === JOB_STATE.WAITING_TOOL) {
+      logEvent('log.toolWait', { n: ev.targetTool != null ? ev.targetTool : '?' });
+    }
+    renderFab();
+  }
+}
 function renderFab() {
   const host = $('#fabSteps');
   if (!host) return;
@@ -948,17 +1415,24 @@ function renderFab() {
   const activeIdx = firstUndoneIdx();
   const viewIdx = (state.fab.view != null && state.fab.view < state.fab.steps.length) ? state.fab.view : (activeIdx >= 0 ? activeIdx : 0);
   const doneLbl = t('fab.done');
+  const job = state.fab.job;
+  const busy = jobActive();
   host.innerHTML = state.fab.steps.map((s, i) => {
     const done = !!state.fab.done[s.id];
     const active = i === activeIdx;
     const shown = i === viewIdx;
-    const cls = `fab-step ${done ? 'done' : ''} ${active ? 'active' : ''} ${shown ? 'shown' : ''} ${s.kind === 'manual' || s.kind === 'dry' ? 'manual' : ''}`;
+    const isJobStep = job && job.stepId === s.id;
+    const badge = isJobStep ? jobStateBadge(job) : '';
+    const cls = `fab-step ${done ? 'done' : ''} ${active ? 'active' : ''} ${shown ? 'shown' : ''} ${s.kind === 'manual' || s.kind === 'dry' ? 'manual' : ''} ${isJobStep && job.monitor.active ? 'job-running' : ''}`;
     const sub = [s.tool ? `${t('step.toolPrefix')}: ${escapeHtml(s.tool)}` : '', s.est ? `≈ ${fmtDur(s.est)}` : '', s.instr ? escapeHtml(s.instr) : ''].filter(Boolean).join(' · ');
+    const dis = busy ? 'disabled' : '';
     let actions = '';
     if (s.kind === 'mill') {
-      actions = `${s.file ? `<button class="btn small" data-fabrun="${s.file}">${t('fab.run')}</button>` : `<span class="muted">${t('fab.noFile')}</span>`}<button class="btn small ghost" data-fabdone="${s.id}">${done ? t('fab.doneMark') : doneLbl}</button>`;
+      actions = `${badge}${s.file ? `<button class="btn small" data-fabrun="${i}" ${dis}>${t('fab.run')}</button>` : `<span class="muted">${t('fab.noFile')}</span>`}<button class="btn small ghost" data-fabdone="${s.id}">${done ? t('fab.doneMark') : doneLbl}</button>`;
     } else if (s.kind === 'setup') {
-      actions = `<button class="btn small" data-fabaction="${s.action}">${t('fab.exec')}</button><button class="btn small ghost" data-fabdone="${s.id}">${done ? t('fab.doneMark') : doneLbl}</button>`;
+      // Config & Run: show the parsed height-map verdict right on the step.
+      const hm = s.id === 'autoSetup' ? hmChipHtml() : '';
+      actions = `${badge}${hm}<button class="btn small" data-fabaction="${s.action}" data-fabidx="${i}" ${dis}>${t('fab.exec')}</button><button class="btn small ghost" data-fabdone="${s.id}">${done ? t('fab.doneMark') : doneLbl}</button>`;
     } else if (s.kind === 'dry') {
       actions = `<span class="fab-dry"><input type="number" value="${s.dryMin}" data-drymin="${s.id}" /> ${t('fab.min')} <button class="btn small" data-drystart="${s.id}">${t('fab.timer')}</button><span class="fab-timer" data-drytimer="${s.id}"></span></span><button class="btn small ghost" data-fabdone="${s.id}">${done ? t('fab.doneMark') : doneLbl}</button>`;
     } else {
@@ -974,9 +1448,15 @@ function renderFab() {
     state.fab.view = (state.fab.view === i) ? null : i;
     renderFab(); drawFab();
   }));
-  $$('[data-fabrun]', host).forEach((b) => b.addEventListener('click', () => fabRun(b.dataset.fabrun)));
+  $$('[data-fabrun]', host).forEach((b) => b.addEventListener('click', () => {
+    const i = Number(b.dataset.fabrun);
+    const step = state.fab.steps[i];
+    if (!step || !stepGateOk(i)) return;
+    fabRun(step);
+  }));
   $$('[data-fabaction]', host).forEach((b) => b.addEventListener('click', () => {
     if (!state.machine.connected) { switchWf('machine'); return toast(t('machine.connectFirst'), true); }
+    if (!stepGateOk(Number(b.dataset.fabidx))) return;
     machineAction(b.dataset.fabaction);
   }));
   $$('[data-fabdone]', host).forEach((b) => b.addEventListener('click', () => { const id = b.dataset.fabdone; state.fab.done[id] = !state.fab.done[id]; renderFab(); drawFab(); }));
@@ -986,14 +1466,113 @@ function renderFab() {
   $('#fabMeta').innerHTML = t('fab.totalTime', { time: fmtDur(est), n: state.fab.steps.length });
   if (activeIdx >= 0) $('#fabStepName').textContent = `${activeIdx + 1}. ${state.fab.steps[activeIdx].title}`;
   else $('#fabStepName').textContent = t('fab.allDone');
+  renderWizard(activeIdx);
   drawFab();
 }
-async function fabRun(file) {
+// Guided Run wizard (A): a prominent banner for the current step with its one
+// primary action + "Next", walking origin → probe → config&run → mill → … in order.
+function renderWizard(activeIdx) {
+  const el = $('#fabWizard');
+  if (!el) return;
+  const steps = state.fab.steps || [];
+  const n = steps.length;
+  if (!n) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  if (activeIdx < 0) { el.innerHTML = `<div class="fw-done">✓ ${escapeHtml(t('fab.allDone'))}</div>`; return; }
+  const s = steps[activeIdx];
+  const doneCount = steps.filter((x) => state.fab.done[x.id]).length;
+  const pct = Math.round((doneCount / n) * 100);
+  const busy = jobActive();
+  const wizBadge = (state.fab.job && state.fab.job.stepId === s.id) ? jobStateBadge(state.fab.job) : '';
+  let primary = '';
+  if (s.kind === 'mill' && s.file) primary = `<button class="btn small primary" id="fwPrimary" ${busy ? 'disabled' : ''}>${t('fab.run')}</button>`;
+  else if (s.kind === 'setup') primary = `<button class="btn small primary" id="fwPrimary" ${busy ? 'disabled' : ''}>${t('fab.exec')}</button>`;
+  const sub = [s.tool ? `${t('step.toolPrefix')}: ${escapeHtml(s.tool)}` : '', s.instr ? escapeHtml(s.instr) : ''].filter(Boolean).join(' · ');
+  el.innerHTML = `
+    <div class="fw-head"><span class="fw-badge">${escapeHtml(t('fab.wizStep', { i: activeIdx + 1, n }))}</span>
+      <div class="fw-bar"><div class="fw-fill" style="width:${pct}%"></div></div></div>
+    <div class="fw-title">${escapeHtml(s.title)} ${wizBadge}</div>
+    ${sub ? `<div class="fw-instr">${sub}</div>` : ''}
+    <div class="fw-actions">${primary}<button class="btn small" id="fwNext" ${busy ? 'disabled' : ''}>${escapeHtml(t('fab.wizNext'))}</button></div>`;
+  const prim = $('#fwPrimary', el);
+  if (prim) prim.addEventListener('click', () => {
+    if (!stepGateOk(activeIdx)) return;
+    if (s.kind === 'mill') return fabRun(s);
+    if (s.kind === 'setup') {
+      if (!state.machine.connected) { switchWf('machine'); return toast(t('machine.connectFirst'), true); }
+      return machineAction(s.action);
+    }
+  });
+  $('#fwNext', el)?.addEventListener('click', () => { state.fab.done[s.id] = true; state.fab.view = null; renderFab(); drawFab(); });
+}
+// ---------- job-start safety gate (Z / leveling plausibility) ----------
+// Cheap, high-signal checks BEFORE a cutting job starts. They exist because a
+// single wrong parameter (a Z origin ~23 mm below the surface) once milled
+// straight through a board — every warning is a real observation, no guess.
+function jobSafetyWarnings() {
+  const warnings = [];
+  const s = state.machine.status;
+  const m = s?.mpos; const wp = s?.wpos;
+  // 0) Machine not homed (MPos above the -1 mm soft-endstop maximum =
+  //    reset/power-cycle without $H): every coordinate — including the
+  //    "origin set" badge — is meaningless. This is the post-incident
+  //    screenshot state (MPos 0/116/63, absurd WPos).
+  if (notHomedFromStatus(s) === true) warnings.push(t('gate.notHomed'));
+  // 1) No Z work offset at all: WCO-Z ≈ 0 means Z was never probed/set since
+  //    homing — the job would cut relative to the HOMING height.
+  if (m && wp && m.length > 2 && wp.length > 2) {
+    const wcoZ = m[2] - wp[2];
+    if (Math.abs(wcoZ) <= SETUP_Z_SET_EPSILON_MM) warnings.push(t('gate.noZ'));
+  }
+  // 2) Leveling deviation: prefer the freshly parsed height map; the live
+  //    status "O:" field (max delta while compensation is active,
+  //    Kernel.cpp:469-474) is the fallback.
+  const assess = state.machine.heightMapAssess;
+  const liveDev = s?.leveling && s.leveling.length ? Math.abs(s.leveling[0]) : null;
+  const dev = assess ? assess.maxDeviation : liveDev;
+  if (dev != null && dev > LEVELING_MAX_DEV_WARN_MM) {
+    warnings.push(t('gate.leveling', { dev: dev.toFixed(2), max: LEVELING_MAX_DEV_WARN_MM }));
+  }
+  if (assess) {
+    for (const w of assess.warnings) {
+      if (w.code === 'tilt') warnings.push(t('hm.warn.tilt', { tilt: w.params.tilt.toFixed(2) }));
+      else if (w.code === 'outlier') warnings.push(t('hm.warn.outlier', { n: w.params.n, x: w.params.x.toFixed(1), y: w.params.y.toFixed(1) }));
+    }
+  }
+  return warnings;
+}
+function jobSafetyGateOk() {
+  const warnings = jobSafetyWarnings();
+  if (!warnings.length) return true;
+  return confirm(t('gate.confirm') + '\n\n• ' + warnings.join('\n• '));
+}
+
+// Upload & start one fabrication step and put it under live monitoring: the
+// start button is disabled immediately (startJobMonitor re-renders), the poll
+// loop then drives running → waitingToolChange → done/failed.
+async function fabRun(step) {
+  const file = step.file;
   const gcode = state.result?.files?.[file];
   if (!gcode) return toast(t('fab.notFound'), true);
   if (!state.machine.connected) { switchWf('machine'); return toast(t('machine.connectFirst'), true); }
+  // Same guard as "Upload & start": no workpiece origin → the job would run
+  // relative to the machine's reference corner (top right).
+  if (originIsSet(state.machine.status) === false && !confirm(t('confirm.noOrigin'))) return;
+  if (!jobSafetyGateOk()) return;
   if (!confirm(t('fab.runConfirm', { file }))) return;
-  try { const d = await api('/api/machine/run', { name: file, gcode, start: true }); toast(t('fab.started', { path: d.path })); logEvent('log.started', { path: d.path }); } catch (err) { toast(t('machine.uploadErr', { msg: err.message }), true); logEvent('log.genError', { msg: err.message }, 'error'); }
+  startJobMonitor(step.id, file, 'play'); // disables all start buttons at once
+  try {
+    const d = await api('/api/machine/run', { name: file, gcode, start: true });
+    toast(t('fab.started', { path: d.path }));
+    logEvent('log.started', { path: d.path });
+  } catch (err) {
+    state.fab.job = null; // upload failed — free the buttons again
+    // the start already switched the vacuum on → schedule the run-on off
+    applyVacuumEvents([{ type: 'state', state: JOB_STATE.FAILED, prev: JOB_STATE.STARTING }], vacuumJobKind(file, 'play'));
+    renderFab();
+    toast(t('machine.uploadErr', { msg: err.message }), true);
+    logEvent('log.genError', { msg: err.message }, 'error');
+  }
 }
 function startDryTimer(id) {
   const min = Number($(`[data-drymin="${id}"]`)?.value) || 10;
@@ -1041,6 +1620,7 @@ function drawFab(marker) {
   const active = state.fab.steps[firstUndoneIdx()];
   const strokeSet = (rings, color, closed, dim) => { ctx.strokeStyle = color; ctx.globalAlpha = dim ? 0.3 : 1; ctx.lineWidth = dim ? 0.8 : 1.4; for (const r of rings) { if (!r || r.length < 2) continue; ctx.beginPath(); r.forEach((pt, i) => { const x = pt.x ?? pt[0]; const y = pt.y ?? pt[1]; i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y)); }); if (closed) ctx.closePath(); ctx.stroke(); } ctx.globalAlpha = 1; };
   strokeSet(p.isolation.flat(), '#ff5a5a', true, !active || active.id !== 'isolation');
+  if (p.clearing?.length) strokeSet(p.clearing, '#f0b429', true, !active || active.id !== 'clearing');
   strokeSet((p.outline || []).map((l) => l.pts), '#2ecc71', true, !active || active.id !== 'outline');
   if (p.laser?.length) strokeSet(p.laser, '#ff59d8', false, !active || active.id !== 'laser');
   for (const d of p.drills) { ctx.beginPath(); ctx.arc(X(d.x), Y(d.y), Math.max(1.2, (d.d / 2) * v.scale), 0, 7); ctx.fillStyle = active && active.id.startsWith('drill') ? 'rgba(76,141,255,0.9)' : 'rgba(76,141,255,0.4)'; ctx.fill(); }
@@ -1055,13 +1635,14 @@ function fabGeom(step) {
   const p = state.result.preview;
   const toXY = (r) => r.map((pt) => ({ x: pt.x ?? pt[0], y: pt.y ?? pt[1] }));
   if (step.id === 'isolation') return { polys: p.isolation.flat().map(toXY), dots: [] };
+  if (step.id === 'clearing') return { polys: (p.clearing || []).map(toXY), dots: [] };
   if (step.id === 'outline') return { polys: (p.outline || []).map((l) => toXY(l.pts)), dots: [] };
   if (step.id === 'laser') return { polys: (p.laser || []).map(toXY), dots: [] };
   if (step.id.startsWith('drill')) { const dia = parseFloat(step.id.split(':')[1]); return { polys: [], dots: p.drills.filter((d) => Math.abs(d.d - dia) < 0.06) }; }
   return null;
 }
 function polyLen(pl) { let L = 0; for (let i = 1; i < pl.length; i++) L += Math.hypot(pl[i].x - pl[i - 1].x, pl[i].y - pl[i - 1].y); return L; }
-function fabColor(step) { return step.id === 'outline' ? '#2ecc71' : step.id === 'laser' ? '#ff59d8' : step.id.startsWith('drill') ? '#4c8dff' : '#ff5a5a'; }
+function fabColor(step) { return step.id === 'outline' ? '#2ecc71' : step.id === 'laser' ? '#ff59d8' : step.id === 'clearing' ? '#f0b429' : step.id.startsWith('drill') ? '#4c8dff' : '#ff5a5a'; }
 
 // Draw the board faint and reveal one step's toolpath up to `frac` (0..1), with a
 // tool head marker — used both for the simulation and the live machine progress.
@@ -1078,6 +1659,7 @@ function drawFabReveal(step, frac) {
   ctx.fillStyle = 'rgba(217,130,43,0.4)'; ctx.fill('evenodd');
   const dim = (rings, color, closed) => { ctx.strokeStyle = color; ctx.globalAlpha = 0.25; ctx.lineWidth = 0.8; for (const r of rings) { if (!r || r.length < 2) continue; ctx.beginPath(); r.forEach((pt, i) => { const x = pt.x ?? pt[0]; const y = pt.y ?? pt[1]; i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y)); }); if (closed) ctx.closePath(); ctx.stroke(); } ctx.globalAlpha = 1; };
   dim(p.isolation.flat(), '#ff5a5a', true);
+  if (p.clearing?.length) dim(p.clearing, '#f0b429', true);
   dim((p.outline || []).map((l) => l.pts), '#2ecc71', true);
   if (p.laser?.length) dim(p.laser, '#ff59d8', false);
   for (const d of p.drills) { ctx.beginPath(); ctx.arc(X(d.x), Y(d.y), Math.max(1.2, (d.d / 2) * v.scale), 0, 7); ctx.fillStyle = 'rgba(76,141,255,0.28)'; ctx.fill(); }
@@ -1170,6 +1752,8 @@ async function machineConnect() {
   try {
     await api('/api/machine/connect', { ip, port });
     state.machine.connected = true;
+    state.machine.wantConnected = true;
+    saveJSON('makera_lastconn', { ip, port });
     $('#mDisconnect').disabled = false;
     $('#mStatus').classList.remove('hidden');
     startStatusPoll();
@@ -1194,13 +1778,60 @@ async function machineRetry() {
   } catch (err) { toast(t('machine.reconnectFail', { msg: err.message }), true); }
 }
 async function machineDisconnect() {
+  state.machine.wantConnected = false; // explicit disconnect: stop auto-reconnect
+  if (state.machine.reconnectTimer) { clearTimeout(state.machine.reconnectTimer); state.machine.reconnectTimer = null; }
+  saveJSON('makera_lastconn', null);
   stopStatusPoll();
   try { await api('/api/machine/disconnect'); } catch {}
   state.machine.connected = false;
+  state.machine.state = null;
+  state.machine.status = null;
   $('#mDisconnect').disabled = true;
   setPill('off', t('machine.disconnected'));
+  renderSetupAssistant();
   const diag = $('#machDiag'); diag.classList.add('hidden'); delete diag.dataset.shown;
   logEvent('log.disconnected', {});
+}
+// Auto-reconnect: after a dropped connection (or a page reload) get back to the
+// last machine on its own, with a capped backoff. Explicit disconnect cancels it.
+async function tryReconnect() {
+  const lc = loadJSON('makera_lastconn', null);
+  if (!lc || !lc.ip || !state.machine.wantConnected || state.machine.connected) return;
+  state.machine.reconnectTries = (state.machine.reconnectTries || 0) + 1;
+  setPill('off', t('machine.reconnecting'));
+  try {
+    await api('/api/machine/connect', { ip: lc.ip, port: lc.port || 2222 });
+    state.machine.connected = true;
+    state.machine.reconnectTries = 0;
+    $('#mDisconnect').disabled = false;
+    $('#mStatus').classList.remove('hidden');
+    startStatusPoll();
+    toast(t('machine.reconnected'));
+  } catch {
+    const delay = Math.min(15000, 1500 * state.machine.reconnectTries);
+    state.machine.reconnectTimer = setTimeout(tryReconnect, delay);
+  }
+}
+// On page load the server may still be connected to the machine (server state
+// survives a browser reload); restore the UI, else auto-reconnect to the last one.
+async function restoreMachineConnection() {
+  try {
+    const res = await fetch('/api/machine/status');
+    const d = await res.json();
+    const lc = loadJSON('makera_lastconn', null);
+    if (lc && lc.ip) { const ipEl = $('#mIp'); if (ipEl && !ipEl.value) ipEl.value = lc.ip; const pEl = $('#mPort'); if (pEl) pEl.value = lc.port || 2222; }
+    if (d.connected) {
+      state.machine.connected = true;
+      state.machine.wantConnected = true;
+      $('#mDisconnect').disabled = false;
+      $('#mStatus').classList.remove('hidden');
+      startStatusPoll();
+    } else if (lc && lc.ip) {
+      state.machine.wantConnected = true;
+      state.machine.reconnectTries = 0;
+      tryReconnect();
+    }
+  } catch { /* server not reachable yet */ }
 }
 function startStatusPoll() {
   stopStatusPoll();
@@ -1213,22 +1844,52 @@ async function pollStatus() {
     const res = await fetch('/api/machine/status');
     const d = await res.json();
     if (!d.connected) {
-      state.machine.connected = false; stopStatusPoll(); $('#mDisconnect').disabled = true; setPill('off', t('machine.disconnected'));
+      state.machine.connected = false; stopStatusPoll(); $('#mDisconnect').disabled = true;
+      state.machine.state = null;
+      state.machine.status = null;
+      updateJobMonitorFromPoll(d, null); // a monitored job fails on disconnect
+      renderToolChangeOverlay(null);
+      renderVacuumState(null); // port state unknown without the link
+      renderSetupAssistant();
       const diag = $('#machDiag'); diag.classList.add('hidden'); delete diag.dataset.shown;
+      if (state.machine.wantConnected) { state.machine.reconnectTries = 0; tryReconnect(); } // heartbeat lost → reconnect
+      else setPill('off', t('machine.disconnected'));
       return;
     }
     const s = d.status || {};
     const state_ = s.state || '—';
     setPill(state_ === 'Run' ? 'run' : 'on', d.xmitting ? t('machine.upload') : (s.state ? state_ : t('machine.connected')));
     const fmt = (a, dg = 2) => (a ? a.map((v) => v.toFixed(dg)).join(' / ') : '—');
-    $('[data-s="state"]').textContent = state_;
-    $('[data-s="wpos"]').textContent = fmt(s.wpos, 2);
-    $('[data-s="feed"]').textContent = s.feed ? s.feed[0].toFixed(0) : '—';
-    $('[data-s="spin"]').textContent = s.spindle ? s.spindle[0].toFixed(0) : '—';
-    $('[data-s="tool"]').textContent = s.tool ? `T${s.tool[0]}` : '—';
+    const setStat = (k, v) => $$(`[data-s="${k}"]`).forEach((el) => { el.textContent = v; });
+    setStat('state', state_);
+    setStat('wpos', fmt(s.wpos, 2));
+    setStat('mpos', fmt(s.mpos, 2)); // machine coordinates (built-in zero = home corner)
+    // Origin badge: tell the user whether a workpiece origin exists (WCO != 0)
+    // — the single most common source of "the machine drives somewhere else".
+    // On an UNHOMED machine (positive MPos after a reset) the stored offsets
+    // are meaningless, so the badge must not claim "set".
+    const unhomed = notHomedFromStatus(s) === true;
+    const oset = originIsSet(s);
+    setStat('origin', oset == null ? '—' : unhomed ? t('machine.originInvalid') : (oset ? t('machine.originOk') : t('machine.originUnset')));
+    $$('[data-s="origin"]').forEach((el) => {
+      el.style.color = oset == null ? '' : (oset && !unhomed ? 'var(--ok, #2ecc71)' : 'var(--warn, #ffb14e)');
+    });
+    setStat('feed', s.feed ? s.feed[0].toFixed(0) : '—');
+    setStat('spin', s.spindle ? s.spindle[0].toFixed(0) : '—');
+    setStat('tool', s.tool ? `T${s.tool[0]}` : '—');
+    // Auto-leveling: the "O:" field only exists while a height map is active
+    // (Kernel.cpp:469-474) and carries its max deviation.
+    const lev = s.leveling && s.leveling.length ? Math.abs(s.leveling[0]) : null;
+    setStat('leveling', lev == null ? t('machine.levelOff') : t('machine.levelActive', { dev: lev.toFixed(2) }));
+    $$('[data-s="leveling"]').forEach((el) => {
+      el.style.color = lev == null ? '' : (lev > LEVELING_MAX_DEV_WARN_MM ? 'var(--warn, #ffb14e)' : 'var(--ok, #2ecc71)');
+    });
     state.machine.tool = s.tool ? s.tool[0] : null;
-    $('#mConsole').textContent = (d.log || []).join('\n');
-    $('#mConsole').scrollTop = $('#mConsole').scrollHeight;
+    state.machine.state = state_; // Idle / Run / Alarm / Home … (used to guard motion)
+    state.machine.status = s; // full parsed status (used by the origin guard)
+    const logText = (d.log || []).join('\n');
+    $$('.mach-console').forEach((el) => { el.textContent = logText; el.scrollTop = el.scrollHeight; });
+    surfaceMachineMessages(d.log || []);
 
     // Live progress from the status "P" (play: lines, percent, seconds) field.
     const prog = $('#mProgress');
@@ -1244,7 +1905,11 @@ async function pollStatus() {
       prog.classList.add('hidden');
     }
     updateFabLive(s);
+    updateJobMonitorFromPoll(d, s);
+    renderToolChangeOverlay(s);
+    renderVacuumState(d.vacuumOn);
     renderAlarm(state_, d.lastAlarm);
+    renderSetupAssistant();
     if (d.lastAlarm && d.lastAlarm.at !== state._lastAlarmAt) { state._lastAlarmAt = d.lastAlarm.at; logEvent('log.alarm', { msg: d.lastAlarm.text }, 'error'); }
 
     // Diagnostic: connected but the machine truly sends nothing back. Only when
@@ -1265,14 +1930,89 @@ async function pollStatus() {
     }
   } catch { /* transient */ }
 }
+// Live badge for the external vacuum port. The firmware status does not
+// report the switch, so the server remembers the last commanded M851/M852
+// (shared by desktop + mobile); while an automated job runs, the badge adds
+// "auto" because the G-code file switches the port itself.
+function renderVacuumState(on) {
+  const el = $('#vacState');
+  if (!el) return;
+  el.className = 'vac-state ' + (on === true ? 'on' : 'off');
+  let txt = on == null ? '—' : on === true ? t('vac.stateOn') : t('vac.stateOff');
+  if (jobActive() && state.fab.job?.vacuumKind !== 'command' && vacuumSettings().enable) {
+    txt += ' · ' + t('vac.stateAuto');
+  }
+  el.textContent = txt;
+}
 function setPill(cls, text) {
   const p = $('#machState');
   if (p) { p.className = 'pill ' + cls; p.textContent = text; }
+  const off = cls === 'off';
+  const connCls = off ? 'off' : (cls === 'run' ? 'run' : 'on');
   const h = $('#machHeaderState');
-  if (h) {
-    const off = cls === 'off';
-    h.className = 'pill hdr-pill ' + (off ? 'off' : (cls === 'run' ? 'run' : 'on'));
-    h.textContent = t(off ? 'machine.hdrDisconnected' : 'machine.hdrConnected');
+  if (h) { h.className = 'pill hdr-pill ' + connCls; h.textContent = t(off ? 'machine.hdrDisconnected' : 'machine.hdrConnected'); }
+  const dk = $('#dockConn');
+  if (dk) { dk.className = 'pill dock-conn ' + connCls; dk.textContent = t(off ? 'machine.hdrDisconnected' : 'machine.hdrConnected'); }
+}
+// Surface important machine replies (buried in the log) as visible toasts, so
+// warnings like "Change to probe tool first!" or "ATC already begun" aren't missed.
+function surfaceMachineMessages(log) {
+  if (!log || !log.length) return;
+  const joined = log.join('\n');
+  const prev = state._lastLogSeen || '';
+  if (joined === prev) return;
+  state._lastLogSeen = joined;
+  let newLines = log;
+  if (prev) {
+    const prevLines = prev.split('\n');
+    const lastPrev = prevLines[prevLines.length - 1];
+    const idx = log.lastIndexOf(lastPrev);
+    if (idx >= 0) newLines = log.slice(idx + 1);
+  }
+  const rx = /(change to probe tool first|ATC already begun|alarm|error|fail|out of range|halt)/i;
+  for (const line of newLines) {
+    const ln = String(line).trim();
+    if (ln && rx.test(ln)) { toast('⚠ ' + ln, true); break; }
+  }
+}
+// Keep the page content clear of the fixed bottom dock: mirror the dock's
+// actual height (it wraps/expands depending on content and viewport) into the
+// content container's padding so the last card is always scrollable into view.
+// (The padding must live on .wf-main — body has height:100%, so body padding
+// would not extend the scrollable area.)
+const DOCK_CLEARANCE_PX = 12;
+function syncDockPadding() {
+  const d = $('#machDock');
+  const main = document.querySelector('.wf-main');
+  if (!d || !main) return;
+  main.style.paddingBottom = `${d.offsetHeight + DOCK_CLEARANCE_PX}px`;
+}
+function initDockPadding() {
+  const d = $('#machDock');
+  if (!d) return;
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(syncDockPadding).observe(d);
+  window.addEventListener('resize', syncDockPadding);
+  syncDockPadding();
+}
+function toggleDock(force) {
+  const d = $('#machDock');
+  if (!d) return;
+  const open = force != null ? force : d.classList.contains('collapsed');
+  d.classList.toggle('collapsed', !open);
+  const tgl = $('#dockToggle');
+  if (tgl) tgl.textContent = open ? '▼' : '▲';
+  saveJSON('makera_dock', open);
+  syncDockPadding();
+}
+async function copyMachineLog() {
+  const el = document.querySelector('.mach-console');
+  const txt = (el && el.textContent || '').trim();
+  if (!txt) return toast(t('dock.empty'), true);
+  try { await navigator.clipboard.writeText(txt); toast(t('dock.copied')); }
+  catch (e) {
+    // clipboard API can be blocked (non-secure context) — fall back to a manual copy
+    try { el.focus(); const r = document.createRange(); r.selectNodeContents(el); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); const ok = document.execCommand('copy'); s.removeAllRanges(); toast(ok ? t('dock.copied') : t('dock.copyFail'), !ok); }
+    catch { toast(t('dock.copyFail'), true); }
   }
 }
 
@@ -1304,13 +2044,426 @@ function renderAlarm(state_, lastAlarm) {
   $('#maUnlock').onclick = () => machineCommand('$X');
   $('#maHelp').onclick = () => { const d = $('#troubleHelp'); if (d) { d.open = true; d.scrollIntoView({ behavior: 'smooth', block: 'center' }); } };
 }
+// ---------- M6 tool-change overlay (full-page modal) ----------
+// The Carvera Air has no ATC: M6 T<n> drives to the change position, beeps
+// and WAITS in the firmware "Tool" state (ATCHandler.cpp manual branch,
+// M490.1 → set_tool_waiting). The overlay appears whenever the live status
+// says state == "Tool" — also for every M6 inside 0_full_job.nc — and closes
+// by itself once the machine moves on (confirm here OR the machine button).
+// Resume = M490.2 (exits the tool wait; same command the community
+// controller's tool-change popup sends). The '~' realtime byte only clears a
+// feed hold and does NOT work here (WifiProvider.cpp:263).
+let tcOverlaySig = null;
+let tcResuming = false;
+
+function toolChangeSvg() {
+  // spindle at the change position with an empty collet + hand-held tool
+  return `<svg viewBox="0 0 200 130" class="tc-svg" role="img" aria-hidden="true">
+    <rect x="66" y="6" width="68" height="46" rx="8" fill="#2b3446" stroke="#3d4a63"/>
+    <text x="100" y="33" text-anchor="middle" fill="#8b98a9" font-size="11">${escapeHtml(t('dg.spindle'))}</text>
+    <rect x="88" y="52" width="24" height="14" rx="2" fill="#8a94a6"/>
+    <path d="M96 66 h8 l-1.5 10 h-5 Z" fill="#5b6b88"/>
+    <rect x="97.4" y="84" width="5.2" height="26" rx="1" fill="#c7cede"/>
+    <path d="M96 110 L104 110 L100 120 Z" fill="#c7cede"/>
+    <path d="M92 96 q-16 4 -22 16" fill="none" stroke="#ffd23f" stroke-width="2.4" stroke-dasharray="4 3"/>
+    <path d="M70 106 l-4 8 8 -2 Z" fill="#ffd23f"/>
+  </svg>`;
+}
+
+function renderToolChangeOverlay(s) {
+  const el = $('#toolOverlay');
+  if (!el) return;
+  const waiting = state.machine.connected && isToolChangeWait(s);
+  if (!waiting) {
+    if (!el.classList.contains('hidden')) {
+      el.classList.add('hidden');
+      el.innerHTML = '';
+      if (tcResuming) logEvent('log.toolResumed', {});
+    }
+    tcOverlaySig = null;
+    tcResuming = false;
+    return;
+  }
+  const target = toolChangeTarget(s) ?? state.fab.job?.monitor?.targetTool ?? null;
+  const tool = target != null ? state.tools.find((x) => x.number === target) : null;
+  const label = tool ? (tool.label || `${tool.type} ${tool.diameter} mm`) : '';
+  const sig = [getLang(), target, label, tcResuming ? 1 : 0].join('|');
+  if (sig === tcOverlaySig && !el.classList.contains('hidden')) return; // keep buttons clickable
+  tcOverlaySig = sig;
+  const toolTxt = target != null && target >= 0
+    ? `T${target}${label ? ' · ' + escapeHtml(label) : ''}`
+    : target === 0 ? 'T0 · ' + escapeHtml(t('dg.probe')) : escapeHtml(t('tc.unknownTool'));
+  el.classList.remove('hidden');
+  el.innerHTML = `<div class="tc-box" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('tc.title'))}">
+      ${toolChangeSvg()}
+      <div class="tc-title">${escapeHtml(t('tc.title'))}</div>
+      <div class="tc-tool">${toolTxt}</div>
+      <div class="tc-desc">${escapeHtml(t('tc.machineState'))}</div>
+      <div class="tc-desc muted">${escapeHtml(t('tc.alreadyIn'))}</div>
+      ${tcResuming
+        ? `<div class="tc-resuming"><span class="spinner"></span>${escapeHtml(t('tc.resuming'))}</div>`
+        : `<button class="btn primary tc-confirm" id="tcConfirm">${escapeHtml(t('tc.confirm'))}</button>`}
+      <div class="tc-desc muted">${escapeHtml(t('tc.orButton'))}</div>
+      <div class="tc-cancel-row"><button class="btn small ghost danger" id="tcCancel" ${tcResuming ? 'disabled' : ''}>${escapeHtml(t('tc.cancel'))}</button></div>
+    </div>`;
+  $('#tcConfirm', el)?.addEventListener('click', async () => {
+    tcResuming = true;
+    tcOverlaySig = null; // force re-render into the "resuming" view
+    logEvent('log.toolResume', { n: target != null ? target : '?' });
+    await machineCommand(RESUME_TOOL_CHANGE_COMMAND);
+    renderToolChangeOverlay(state.machine.status);
+  });
+  $('#tcCancel', el)?.addEventListener('click', async () => {
+    if (!confirm(t('tc.cancelConfirm'))) return;
+    if (state.fab.job && state.fab.job.monitor.active) {
+      // a deliberate abort must not count as "done" — and it schedules the
+      // vacuum run-on off (the aborted file never reaches its own M852)
+      applyVacuumEvents(state.fab.job.monitor.cancel(), state.fab.job.vacuumKind);
+      renderFab();
+    }
+    await machineCommands(ABORT_JOB_COMMANDS);
+    logEvent('log.jobAborted', {});
+    toast(t('tc.cancelled'));
+  });
+}
+
+// ---------- auto-leveling height map (fetch → assess → visualise) ----------
+// The G32 grid probe prints every point + the grid + "Max deviation from
+// zero" into the console (CartGridStrategy.cpp doProbe) — the server mirrors
+// that log, so the map is parsed from /api/machine/log without sending any
+// extra command to the machine.
+let hmViewer3d = null;
+
+async function fetchHeightMap() {
+  try {
+    const res = await fetch('/api/machine/log');
+    const d = await res.json();
+    const map = parseLevelingFromLog(d.log || []);
+    if (!map) return;
+    state.machine.heightMap = map;
+    state.machine.heightMapAssess = assessHeightMap(map);
+    const a = state.machine.heightMapAssess;
+    logEvent('log.heightMap', { dev: a.maxDeviation.toFixed(3), i: map.cols, j: map.rows }, a.ok ? 'info' : 'warn');
+    if (!a.ok) toast(t('hm.toastWarn', { dev: a.maxDeviation.toFixed(2) }), true);
+    renderHeightMapPanel();
+    renderFab(); // compact chip on the Config & Run step
+  } catch { /* log not reachable — panel simply stays empty */ }
+}
+
+function hmWarningTexts(assess) {
+  const out = [];
+  for (const w of assess.warnings) {
+    if (w.code === 'total-dev') out.push(t('hm.warn.totalDev', { dev: w.params.dev.toFixed(2), max: w.params.max }));
+    else if (w.code === 'tilt') out.push(t('hm.warn.tilt', { tilt: w.params.tilt.toFixed(2) }));
+    else if (w.code === 'outlier') out.push(t('hm.warn.outlier', { n: w.params.n, x: w.params.x.toFixed(1), y: w.params.y.toFixed(1) }));
+  }
+  return out;
+}
+
+// Compact summary chip: max deviation + warn icon + "3D" button. Used in the
+// Machine tab panel and (via renderFab) on the fabrication Config & Run step.
+function hmChipHtml() {
+  const map = state.machine.heightMap;
+  const a = state.machine.heightMapAssess;
+  if (!map || !a) return '';
+  const warn = !a.ok;
+  return `<span class="hm-chip ${warn ? 'warn' : 'ok'}">${warn ? '⚠' : '✓'} ${t('hm.maxDev', { dev: a.maxDeviation.toFixed(2) })}</span>`
+    + `<button class="btn small ghost" data-hmopen>${t('hm.open3d')}</button>`;
+}
+
+function renderHeightMapPanel() {
+  const host = $('#hmPanel');
+  if (!host) return;
+  const map = state.machine.heightMap;
+  const a = state.machine.heightMapAssess;
+  if (!map || !a) { host.classList.add('hidden'); host.innerHTML = ''; return; }
+  const warnings = hmWarningTexts(a);
+  host.classList.remove('hidden');
+  host.innerHTML = `<div class="hm-head"><b>${t('hm.title')}</b>`
+    + `<span class="muted">${t('hm.meta', { i: map.cols, j: map.rows, w: map.xSize.toFixed(1), h: map.ySize.toFixed(1) })}</span>`
+    + `<span class="hm-actions">${hmChipHtml()}</span></div>`
+    + (warnings.length
+      ? warnings.map((w) => `<div class="check warn"><span class="ico">⚠</span><span>${escapeHtml(w)}</span></div>`).join('')
+      : `<div class="check ok"><span class="ico">✓</span><span>${escapeHtml(t('hm.flatOk'))}</span></div>`);
+}
+
+// Full-screen modal with the interactive 3D surface (three.js bundle) or the
+// 2D heatmap fallback when the bundle is unavailable.
+function openHeightMapModal() {
+  const map = state.machine.heightMap;
+  const a = state.machine.heightMapAssess;
+  if (!map) return;
+  const el = $('#hmModal');
+  if (!el) return;
+  const warnings = a ? hmWarningTexts(a) : [];
+  el.classList.remove('hidden');
+  el.innerHTML = `<div class="hm-box" role="dialog" aria-modal="true" aria-label="${escapeHtml(t('hm.title'))}">
+      <div class="hm-box-head">
+        <b>${t('hm.title')}</b>
+        <span class="muted">${t('hm.meta', { i: map.cols, j: map.rows, w: map.xSize.toFixed(1), h: map.ySize.toFixed(1) })}</span>
+        <span class="hm-legend"><i style="background:hsl(120,85%,50%)"></i>${t('hm.legendFlat')} <i style="background:hsl(60,85%,50%)"></i> <i style="background:hsl(0,85%,50%)"></i>${t('hm.legendDev')}</span>
+        <button class="btn small ghost" id="hmClose">${t('hm.close')}</button>
+      </div>
+      ${a ? `<div class="hm-box-meta">${t('hm.range', { min: a.min.toFixed(3), max: a.max.toFixed(3) })} · ${t('hm.maxDev', { dev: a.maxDeviation.toFixed(2) })} · ${t('hm.tilt', { tilt: a.tiltMm.toFixed(2) })}</div>` : ''}
+      ${warnings.map((w) => `<div class="check warn"><span class="ico">⚠</span><span>${escapeHtml(w)}</span></div>`).join('')}
+      <div class="hm-canvas-host" id="hmCanvasHost"><div class="hm-tip hidden" id="hmTip"></div></div>
+      <div class="muted hm-hint">${t('hm.hint')}</div>
+    </div>`;
+  $('#hmClose', el).addEventListener('click', closeHeightMapModal);
+  el.addEventListener('click', (e) => { if (e.target === el) closeHeightMapModal(); });
+  const host = $('#hmCanvasHost', el);
+  const Viewer = window.MakeraHeightMap3D;
+  if (Viewer) {
+    try {
+      hmViewer3d = new Viewer(host, { tooltipEl: $('#hmTip', el), warnMm: LEVELING_MAX_DEV_WARN_MM });
+      hmViewer3d.setData(map);
+      return;
+    } catch { /* fall through to 2D */ }
+  }
+  const cv = document.createElement('canvas');
+  cv.className = 'hm-canvas2d';
+  host.appendChild(cv);
+  drawHeightMap2D(cv, map);
+}
+function closeHeightMapModal() {
+  const el = $('#hmModal');
+  if (!el) return;
+  if (hmViewer3d) { try { hmViewer3d.dispose(); } catch {} hmViewer3d = null; }
+  el.classList.add('hidden');
+  el.innerHTML = '';
+}
+
+// Support hook: reproduce a height map from pasted machine-log lines in the
+// browser console — window.__makeraHeightMap.show([...lines]). Runs the exact
+// same parse → assess → panel → 3D path as the automatic fetch.
+window.__makeraHeightMap = {
+  parse: parseLevelingFromLog,
+  show(lines) {
+    const map = parseLevelingFromLog(lines);
+    if (!map) return null;
+    state.machine.heightMap = map;
+    state.machine.heightMapAssess = assessHeightMap(map);
+    renderHeightMapPanel();
+    renderFab();
+    openHeightMapModal();
+    return state.machine.heightMapAssess;
+  },
+};
+
+// ---------- setup assistant (Machine tab) ----------
+// Walks a new project through connect → home/alarm → place board → origin →
+// probe/leveling → start job. Step states are DETECTED from the live status
+// (connection, Alarm/Home, origin badge, Z offset) — manual steps are ticked
+// by the user. Renders only when something changed so buttons stay clickable.
+// (SETUP_PLACED_KEY lives in project-reset.js — it must be cleared on every
+// project switch.)
+const SETUP_Z_SET_EPSILON_MM = 0.01; // WCO-Z beyond this = Z was probed/set
+
+function setupSteps() {
+  const connected = state.machine.connected;
+  const st = state.machine.state;
+  const s = state.machine.status;
+  const inAlarm = st === 'Alarm' || st === 'Halt';
+  // A homed Carvera never reports MPos above the -1 mm soft-endstop maximum
+  // (Robot.cpp:345-347). Positive MPos = reset/power-cycle without homing:
+  // WCO (and therefore the origin/Z "done" detection) is meaningless then.
+  const unhomed = notHomedFromStatus(s) === true;
+  const oset = originIsSet(s);
+  const m = s?.mpos; const w = s?.wpos;
+  const wcoZ = (m && w && m.length > 2 && w.length > 2) ? m[2] - w[2] : 0;
+  const placed = !!loadJSON(SETUP_PLACED_KEY, false);
+  const steps = [];
+  steps.push({
+    id: 'connect',
+    status: connected ? 'done' : 'todo',
+    desc: t('setup.connect.i'),
+    btn: connected ? null : { action: 'connect', label: t('setup.connect.btn') },
+  });
+  steps.push({
+    id: 'ready',
+    status: !connected ? 'blocked' : inAlarm ? 'error' : st === 'Home' ? 'wait' : unhomed ? 'todo' : 'done',
+    desc: inAlarm ? t('setup.ready.iAlarm') : st === 'Home' ? t('setup.ready.iHoming') : unhomed ? t('setup.ready.iUnhomed') : t('setup.ready.i'),
+    btn: inAlarm
+      ? { action: 'ack', label: t('setup.ready.ackBtn') }
+      : { action: 'home', label: t('setup.ready.homeBtn') },
+  });
+  steps.push({
+    id: 'place',
+    status: placed ? 'done' : 'todo',
+    desc: t('setup.place.i'),
+    btn: { action: 'place', label: placed ? t('setup.place.undoBtn') : t('setup.place.btn') },
+  });
+  steps.push({
+    id: 'origin',
+    status: !connected ? 'blocked' : (oset === true && !unhomed) ? 'done' : 'todo',
+    desc: unhomed && oset === true ? t('setup.origin.iUnhomed') : t('setup.origin.i'),
+    btn: { action: 'origin', label: t('setup.origin.btn') },
+  });
+  steps.push({
+    id: 'probe',
+    status: !connected ? 'blocked' : (Math.abs(wcoZ) > SETUP_Z_SET_EPSILON_MM && !unhomed) ? 'done' : 'todo',
+    desc: t('setup.probe.i'),
+    btn: { action: 'probe', label: t('setup.probe.btn') },
+  });
+  steps.push({
+    id: 'job',
+    status: st === 'Run' ? 'done' : !connected ? 'blocked' : 'todo',
+    desc: t('setup.job.i'),
+    btn: { action: 'job', label: t('setup.job.btn') },
+  });
+  return steps;
+}
+
+function renderSetupAssistant() {
+  const host = $('#setupAssist');
+  if (!host) return;
+  const steps = setupSteps();
+  const sig = getLang() + JSON.stringify(steps.map((s) => [s.status, s.desc, s.btn?.label]));
+  if (host.dataset.sig === sig) return; // nothing changed — keep the DOM stable
+  host.dataset.sig = sig;
+  const active = steps.find((x) => x.status === 'todo' || x.status === 'error' || x.status === 'wait');
+  host.innerHTML = `<div class="sa-head"><b>${t('setup.title')}</b> <span class="muted">${t('setup.subtitle')}</span></div>`
+    + steps.map((s, i) => {
+      const ico = s.status === 'done' ? '✓' : s.status === 'error' ? '⚠' : s.status === 'wait' ? '⋯' : String(i + 1);
+      const isActive = active && active.id === s.id;
+      const btn = s.btn
+        ? `<button class="btn small ${isActive ? 'primary' : 'ghost'}" data-assist="${s.btn.action}">${escapeHtml(s.btn.label)}</button>`
+        : '';
+      return `<div class="sa-step ${s.status}${isActive ? ' active' : ''}">`
+        + `<span class="sa-num">${ico}</span>`
+        + `<div class="sa-main"><div class="sa-title">${escapeHtml(t('setup.' + s.id + '.t'))}</div><div class="sa-desc">${escapeHtml(s.desc)}</div></div>`
+        + `<div class="sa-act">${btn}</div></div>`;
+    }).join('');
+}
+
+async function setupProbeFlow() {
+  if (!state.machine.connected) return toast(t('machine.connectFirst'), true);
+  // Config & Run: DON'T pre-set the tool number (M493.2 T0) — the firmware's
+  // M495 changes to the probe ITSELF when needed ("Change to probe tool
+  // first!", ATCHandler.cpp:2466-2488) including the TLO calibration of the
+  // probe. A bare M493.2 T0 would make it SKIP that calibration and corrupt
+  // the next tool's length offset.
+  machineAction('autoSetup');
+}
+
+async function setupAction(action) {
+  switch (action) {
+    case 'connect':
+      switchWf('machine');
+      if ($('#mIp').value.trim()) machineConnect(); else machineDiscover();
+      return;
+    case 'ack':
+      // Acknowledge an alarm the official way: soft reset, then unlock ($X).
+      await machineRealtime('reset');
+      setTimeout(() => machineCommand('$X'), 800);
+      toast(t('setup.ready.acked'));
+      return;
+    case 'home': return machineAction('home');
+    case 'place': {
+      const cur = !!loadJSON(SETUP_PLACED_KEY, false);
+      saveJSON(SETUP_PLACED_KEY, !cur);
+      renderSetupAssistant();
+      return;
+    }
+    case 'origin':
+      if (jobActive()) return toast(t('job.alreadyRunning'), true);
+      return setOriginAnchor1Flow();
+    case 'probe':
+      if (jobActive()) return toast(t('job.alreadyRunning'), true);
+      return setupProbeFlow();
+    case 'job': switchWf('fab'); return;
+  }
+}
+
 async function machineCommand(line) {
   if (!state.machine.connected) return toast(t('machine.notConnected'), true);
   try { await api('/api/machine/command', { line }); } catch (err) { toast(err.message, true); }
 }
+// Send a SEQUENCE of commands strictly in order (each request is awaited, so
+// e.g. the safe Z raise is guaranteed to reach the machine before the XY move).
+// Resolves true when every command was accepted.
+async function machineCommands(lines) {
+  if (!state.machine.connected) { toast(t('machine.notConnected'), true); return false; }
+  try {
+    for (const line of lines) await api('/api/machine/command', { line });
+    return true;
+  } catch (err) { toast(err.message, true); return false; }
+}
 async function machineRealtime(code) {
   if (!state.machine.connected) return toast(t('machine.notConnected'), true);
   try { await api('/api/machine/realtime', { code }); } catch (err) { toast(err.message, true); }
+}
+
+// ---------- one-click "origin = anchor 1" (sequenced, fault-tolerant) ----------
+// M496.x moves execute DEFERRED on the firmware main loop (see
+// machine-commands.js), so after "goto anchor 1" we must wait until the
+// machine is Idle again before touching the coordinate system. Sending the
+// next command immediately is what used to trip "Soft Endstop X was exceeded".
+const ANCHOR_MOVE_TIMEOUT_MS = 60000; // anchor rapid across the whole bed < 1 min
+const ANCHOR_POLL_INTERVAL_MS = 400; // faster than the regular 1 s status poll
+const ANCHOR_MOVE_MIN_WAIT_MS = 1500; // let the deferred move actually start
+const ANCHOR_IDLE_STREAK = 2; // consecutive Idle samples = move finished
+
+async function waitForIdleAfterMove(timeoutMs = ANCHOR_MOVE_TIMEOUT_MS) {
+  const t0 = Date.now();
+  let idleStreak = 0;
+  while (Date.now() - t0 < timeoutMs) {
+    await new Promise((r) => setTimeout(r, ANCHOR_POLL_INTERVAL_MS));
+    let d;
+    try { const res = await fetch('/api/machine/status'); d = await res.json(); } catch { continue; }
+    if (!d.connected) return { ok: false, reason: 'disconnected' };
+    if (d.status) state.machine.status = d.status;
+    const st = d.status?.state;
+    if (st === 'Alarm' || st === 'Halt') return { ok: false, reason: 'alarm' };
+    if (st === 'Idle' && Date.now() - t0 >= ANCHOR_MOVE_MIN_WAIT_MS) {
+      if (++idleStreak >= ANCHOR_IDLE_STREAK) return { ok: true };
+    } else if (st !== 'Idle') {
+      idleStreak = 0;
+    }
+  }
+  return { ok: false, reason: 'timeout' };
+}
+
+let anchorFlowRunning = false;
+async function setOriginAnchor1Flow() {
+  if (anchorFlowRunning) return;
+  // Preconditions with actionable messages instead of firing blindly: an
+  // alarmed/homing/busy machine must not start the sequence at all.
+  const ready = anchor1Readiness(state.machine.status, state.machine.connected);
+  if (!ready.ok) {
+    const key = {
+      'not-connected': 'machine.notConnected',
+      'no-status': 'anchor.noStatus',
+      alarm: 'anchor.alarmFirst',
+      homing: 'anchor.homingWait',
+      busy: 'anchor.busy',
+    }[ready.reason] || 'anchor.noStatus';
+    toast(t(key), true);
+    if (ready.reason === 'not-connected') switchWf('machine');
+    return;
+  }
+  if (!confirm(t('confirm.setOriginAnchor1', { x: ANCHOR1_OFFSET.x, y: ANCHOR1_OFFSET.y }))) return;
+  anchorFlowRunning = true;
+  try {
+    toast(t('anchor.driving'));
+    if (!(await machineCommands([gotoAnchor1Command()]))) return;
+    const wait = await waitForIdleAfterMove();
+    if (!wait.ok) {
+      const key = wait.reason === 'alarm' ? 'anchor.moveAlarm'
+        : wait.reason === 'disconnected' ? 'machine.notConnected'
+        : 'anchor.moveTimeout';
+      toast(t(key), true);
+      logEvent('log.alarm', { msg: t(key) }, 'error');
+      return;
+    }
+    // Pure WCS bookkeeping (no motion): current position (= anchor 1) becomes
+    // work X-15/Y-10 → the work origin sits at anchor 1 + X15/Y10.
+    if (!(await machineCommands(setOriginAtAnchorOffsetCommands()))) return;
+    toast(t('machine.originAnchorSet', { x: ANCHOR1_OFFSET.x, y: ANCHOR1_OFFSET.y }));
+    logEvent('log.originAnchorSet', {});
+  } finally {
+    anchorFlowRunning = false;
+  }
 }
 async function machineJog(axis, sign) {
   if (!state.machine.connected) return toast(t('machine.notConnected'), true);
@@ -1321,14 +2474,29 @@ async function machineJog(axis, sign) {
 }
 // Hold-to-jog: a quick tap moves one step; holding a button jogs continuously
 // (a single large jog) until release, when a realtime jog-cancel (0x19) stops it.
-const JOG_TRAVEL = { X: 340, Y: 240, Z: 130, A: 720 };
+// Hold-to-jog: STREAM small incremental jogs while the button is held, instead of one
+// huge jog. A single big jog (e.g. 340 mm) overshoots the machine's soft limits from
+// almost anywhere and trips "Soft Endstop exceeded". Small steps far from the limit are
+// always safe; a realtime jog-cancel (0x19) on release stops/flushes smoothly. If a step
+// does hit the edge, the request errors and we stop streaming (no alarm spam).
+let jogStreaming = false;
+const JOG_STEP = { X: 2, Y: 2, Z: 1, A: 4 };
 async function machineJogContinuous(axis, sign) {
   if (!state.machine.connected) return toast(t('machine.notConnected'), true);
   const feed = Number($('#jogFeed').value) || 800;
-  const dist = (sign < 0 ? '-' : '') + (JOG_TRAVEL[axis] || 100);
-  try { await api('/api/machine/jog', { axis, dist, feed }); } catch (err) { toast(err.message, true); }
+  const step = JOG_STEP[axis] || 2;
+  jogStreaming = true;
+  const loop = async () => {
+    if (!jogStreaming) return;
+    const dist = (sign < 0 ? '-' : '') + step;
+    try { await api('/api/machine/jog', { axis, dist, feed }); }
+    catch { jogStreaming = false; return; } // reached a soft limit at the edge → stop cleanly
+    if (jogStreaming) setTimeout(loop, 60);
+  };
+  loop();
 }
 async function machineJogStop() {
+  jogStreaming = false;
   if (!state.machine.connected) return;
   try { await api('/api/machine/realtime', { code: 'jogstop' }); } catch { /* ignore */ }
 }
@@ -1389,6 +2557,25 @@ function machineAction(action) {
   const w = b ? b.width.toFixed(2) : 0;
   const h = b ? b.height.toFixed(2) : 0;
   const need = () => { if (!b) { toast(t('machine.loadFirst'), true); return false; } return true; };
+  // NOTE: probing / leveling / Config & Run no longer require T0 up front —
+  // the firmware's M495 changes to the probe itself when needed (tool-wait
+  // overlay + TLO calibration, ATCHandler.cpp:2466-2488). Pre-setting the
+  // number with M493.2 T0 would skip that calibration (stale cur_tool_mz)
+  // and corrupt the next tool's length offset.
+  // In Alarm/Homing the work coordinate system is invalid, so any absolute move or
+  // origin set would go to the wrong place ("forgot its coordinate system"). Block it.
+  const needReady = () => {
+    const st = state.machine.state;
+    if (st === 'Alarm' || st === 'Home') { toast(t('machine.homeFirst'), true); return false; }
+    return true;
+  };
+  // Work-coordinate moves are meaningless before a workpiece origin was set:
+  // with WCO = 0 every "work" position is really measured from the machine's
+  // reference corner (top right). Warn loudly and let the user opt in.
+  const needOrigin = () => {
+    if (originIsSet(state.machine.status) !== false) return true;
+    return confirm(t('confirm.noOrigin'));
+  };
   switch (action) {
     case 'home': return machineCommand('$H');
     case 'unlock': return machineCommand('$X');
@@ -1396,57 +2583,87 @@ function machineAction(action) {
     case 'pause': return machineRealtime('pause');
     case 'resume': return machineRealtime('resume');
     case 'stop': if (confirm(t('confirm.stop'))) machineRealtime('reset'); return;
-    case 'setOriginXYZ': if (confirm(t('confirm.setOriginXYZ'))) { machineCommand('G10 L20 P0 X0 Y0 Z0'); toast(t('machine.originSet')); } return;
-    case 'setOriginXY': if (confirm(t('confirm.setOriginXY'))) { machineCommand('G10 L20 P0 X0 Y0'); toast(t('machine.originSet')); } return;
+    case 'setOriginXYZ': if (!needReady()) return; if (confirm(t('confirm.setOriginXYZ'))) { machineCommand('G10 L20 P0 X0 Y0 Z0'); toast(t('machine.originSet')); } return;
+    case 'setOriginXY': if (!needReady()) return; if (confirm(t('confirm.setOriginXY'))) { machineCommand('G10 L20 P0 X0 Y0'); toast(t('machine.originSet')); } return;
+    // One-click anchor-1 origin: goto anchor 1 (M496.3), WAIT until the
+    // deferred firmware move finished, then set the origin via G10 L20 at the
+    // Makera offset — no relative move, no soft-endstop risk (see the flow).
+    case 'setOriginAnchor1': setOriginAnchor1Flow(); return;
     case 'gotoClearance': machineCommand('M496.1'); toast(t('machine.cmdSent')); return;
     case 'gotoOrigin':
-      // We set the work origin as a G54 offset (G10 L20 P0), so we must return via the
-      // SAME coordinate system: raise Z to clearance, then rapid to work X0/Y0.
-      // (M496.2 goes to the Carvera's separate anchor-relative work origin and would NOT
-      //  match a G10-set zero — that is why "go to origin" didn't return before.)
-      machineCommand('M496.1');
-      machineCommand('G90 G0 X0 Y0');
+      // Return to the work origin you set (G54 zero). Raise Z straight up in machine
+      // coords first (G53 = near the top, no XY dart to the corner), then rapid to
+      // work X0/Y0 in YOUR coordinate system.
+      if (!needReady() || !needOrigin()) return;
+      machineCommands(gotoWorkOriginCommands());
       toast(t('machine.cmdSent'));
       return;
     case 'gotoXY': {
+      if (!needReady()) return;
       const gx = parseFloat($('#gotoX').value);
       const gy = parseFloat($('#gotoY').value);
-      const parts = [];
-      if (Number.isFinite(gx)) parts.push('X' + gx);
-      if (Number.isFinite(gy)) parts.push('Y' + gy);
-      if (!parts.length) return toast(t('machine.gotoNeedXY'), true);
+      // "Go to X/Y" moves in YOUR work coordinate system (relative to the origin you set),
+      // which is what one intuitively expects: X0 Y15 = 15 mm from your zero. Raise Z
+      // straight up first (G53, no corner dart), then move XY absolute in the WCS.
+      const cmds = gotoWorkXYCommands(gx, gy);
+      if (!cmds.length) return toast(t('machine.gotoNeedXY'), true);
+      if (!needOrigin()) return;
       if (!confirm(t('confirm.gotoXY', { x: Number.isFinite(gx) ? gx : '–', y: Number.isFinite(gy) ? gy : '–' }))) return;
-      machineCommand('M496.1'); // raise to clearance (Z-safe) first
-      machineCommand('G90 G0 ' + parts.join(' ')); // then move in the active work coordinate system
+      machineCommands(cmds);
       toast(t('machine.cmdSent'));
       return;
     }
-    case 'margin': if (!need()) return; if (confirm(t('confirm.margin'))) { machineCommand(`M495 X0 Y0 C${w} D${h}`); toast(t('machine.cmdSent')); } return;
-    case 'probe': if (confirm(t('confirm.probe'))) { machineCommand('M495 X0 Y0 O0'); toast(t('machine.cmdSent')); } return;
+    // Scan margin / Z-probe / leveling run ON THE BOARD AREA: the placement
+    // offset (drag & drop) shifts their start via the M495 X/Y letters — the
+    // same offset the generated G-code was shifted by (activePlacement()).
+    case 'margin': if (!need() || !needReady()) return; if (confirm(t('confirm.margin'))) { machineCommand(scanMarginCommand(b.width, b.height, activePlacement())); toast(t('machine.cmdSent')); } return;
+    // Workpiece Auto-Z-Probe at the board's bottom-left corner (O0 F0 →
+    // fill_zprobe_scripts: probe on the board, surface becomes Z0). O WITHOUT
+    // F would select the firmware's 4TH-AXIS absolute probe, which places Z0
+    // ~23 mm BELOW the touched surface (rotation_offset_z) — that exact
+    // parameter bug once milled straight through a board. See machine-commands.js.
+    case 'probe': if (!needReady()) return; if (confirm(t('confirm.probe'))) { machineCommand(zProbeCommand(activePlacement())); startJobMonitor('probeZ', 'M495 Z-Probe', 'command'); toast(t('machine.cmdSent')); } return;
     case 'level': {
-      if (!need()) return;
-      // Makera PCB default is a 5×5 grid at 2 mm detection height (LED example);
-      // add points for larger boards, capped at 9×9.
-      const i = Math.min(9, Math.max(5, Math.round(b.width / 15)));
-      const j = Math.min(9, Math.max(5, Math.round(b.height / 15)));
-      if (confirm(t('confirm.level', { i, j }))) { machineCommand(`M495 X0 Y0 A${w} B${h} I${i} J${j} H2`); toast(t('machine.cmdSent')); }
+      if (!need() || !needReady()) return;
+      // Makera PCB default is a 5×5 grid at 2 mm detection height; add points
+      // for larger boards, capped at 9×9 (levelingGrid).
+      const { i, j } = levelingGrid(b.width, b.height);
+      if (confirm(t('confirm.level', { i, j }))) {
+        machineCommand(autoLevelCommand(b.width, b.height, { i, j }, activePlacement()));
+        startJobMonitor('levelMap', 'M495 Auto-Leveling', 'command');
+        toast(t('machine.cmdSent'));
+      }
       return;
     }
-    // Change to the probe (T0). M495 (margin/Z-probe/leveling) refuses with
-    // "Change to probe tool first!" unless the machine's active tool is the probe —
-    // inserting it physically is not enough, the firmware needs an M6 T0.
-    case 'probeIn': if (confirm(t('confirm.probeIn'))) { machineCommand('M6 T0'); toast(t('machine.cmdSent')); } return;
+    // "Insert the wired probe (T0)": a REAL M6 T0 — drives to the change
+    // position, waits (tool-change overlay), then measures the probe on the
+    // TLO sensor. That calibration is what keeps the next tool's length
+    // offset correct (ref_tool_mz chain). If the machine already reports T0,
+    // recalibrate with M491 instead (M6 T0 would be a no-op then).
+    case 'probeIn': {
+      if (!needReady()) return;
+      const cmd = insertProbeCommand(state.machine.tool);
+      if (confirm(t(cmd === 'M491' ? 'confirm.probeCali' : 'confirm.probeIn'))) {
+        machineCommand(cmd);
+        startJobMonitor('insertProbe', cmd, 'command');
+        toast(t('machine.probeStarted'));
+      }
+      return;
+    }
+    // Recovery only: correct the stored tool number WITHOUT calibration
+    // (M493.2). Warning: this skips the TLO measurement — the next Z probe /
+    // tool change works with a stale reference. Prefer "probeIn" (M6 T0).
+    case 'probeChange': if (confirm(t('confirm.probeChange'))) { machineCommand('M493.2 T0'); toast(t('machine.probeStarted')); } return;
     case 'autoSetup': {
-      if (!need()) return;
+      if (!need() || !needReady()) return;
       // One combined M495 = Makera "Config and Run": Scan Margin (C/D) +
-      // Auto Z Probe (O0) + Auto Leveling (A/B grid, H2) + return to origin (P1).
-      const i = Math.min(9, Math.max(5, Math.round(b.width / 15)));
-      const j = Math.min(9, Math.max(5, Math.round(b.height / 15)));
+      // Auto Z Probe at the work origin (O0 F0!) + Auto Leveling (A/B grid,
+      // H2) + park (P1). If the probe is not the active tool the firmware
+      // inserts the tool change itself (overlay pops, then it calibrates).
+      const { i, j } = levelingGrid(b.width, b.height);
       if (confirm(t('confirm.autoSetup', { i, j }))) {
-        // M495 needs the probe as the active tool — switch to it first if the machine
-        // still reports a different tool (e.g. T6 left over from a previous job).
-        if (state.machine.tool != null && state.machine.tool !== 0) machineCommand('M6 T0');
-        machineCommand(`M495 X0 Y0 C${w} D${h} O0 A${w} B${h} I${i} J${j} H2 P1`);
+        machineCommand(configAndRunCommand(b.width, b.height, { i, j }, activePlacement()));
+        startJobMonitor('autoSetup', 'M495 Config & Run', 'command');
         toast(t('machine.cmdSent'));
       }
       return;
@@ -1454,8 +2671,12 @@ function machineAction(action) {
     // --- accessories (Supported Codes) ---
     case 'lightOn': return machineCommand('M821');
     case 'lightOff': return machineCommand('M822');
-    case 'vacOn': return machineCommand('M331'); // auto vacuum on
-    case 'vacOff': return machineCommand('M332');
+    // External vacuum / air cleaner on the Air's external control port
+    // (M851/M852 — switch.extendout; on the Air M331/M332 would only arm the
+    // UNCONNECTED internal-vacuum switch, see machine-commands.js). A manual
+    // switch cancels a pending automatic run-on so it can't override the user.
+    case 'vacOn': cancelVacuumOffTimer(); return machineCommand(VACUUM_ON_COMMAND);
+    case 'vacOff': cancelVacuumOffTimer(); return machineCommand(VACUUM_OFF_COMMAND);
     case 'airOn': return machineCommand('M7'); // air assist / airflow
     case 'airOff': return machineCommand('M9');
     case 'fanOn': return machineCommand('M811 S100'); // spindle cooling fan
@@ -1484,12 +2705,29 @@ async function machineUpload(start) {
   const name = $('#runFile').value;
   const gcode = state.result?.files?.[name];
   if (!gcode) return toast(t('machine.noFile'), true);
+  // Starting a job without a workpiece origin would mill relative to the
+  // machine's reference corner (top right) — warn explicitly before running.
+  if (start && originIsSet(state.machine.status) === false && !confirm(t('confirm.noOrigin'))) return;
+  if (start && !jobSafetyGateOk()) return;
   if (start && !confirm(t('confirm.runUpload', { name }))) return;
+  // Manual "Upload & Start" gets the same live monitoring as a fabrication
+  // step (blocks parallel starts, drives the vacuum automation incl. the
+  // off-after-failure safety net). No stepId — it is not a guided step.
+  if (start) startJobMonitor(null, name, 'play');
   try {
     const d = await api('/api/machine/run', { name, gcode, start });
     toast(start ? t('machine.started', { path: d.path }) : t('machine.uploaded', { path: d.path }));
     logEvent(start ? 'log.started' : 'log.uploaded', { path: d.path });
-  } catch (err) { toast(t('machine.uploadErr', { msg: err.message }), true); logEvent('log.genError', { msg: err.message }, 'error'); }
+  } catch (err) {
+    if (start) {
+      state.fab.job = null; // upload failed — free the monitor
+      // the start already switched the vacuum on → schedule the run-on off
+      applyVacuumEvents([{ type: 'state', state: JOB_STATE.FAILED, prev: JOB_STATE.STARTING }], vacuumJobKind(name, 'play'));
+      renderFab();
+    }
+    toast(t('machine.uploadErr', { msg: err.message }), true);
+    logEvent('log.genError', { msg: err.message }, 'error');
+  }
 }
 
 // ---------- connection profiles ----------
@@ -1617,6 +2855,46 @@ async function aiReview() {
   }
 }
 function setAiPill(cls, text) { const p = $('#aiState'); p.className = 'pill ' + cls; p.textContent = text; }
+// Ask the AI to diagnose the machine log (leverages the OpenAI key from the AI tab / .env).
+async function aiDiagnose() {
+  const apiKey = $('#aiKey')?.value.trim() || '';
+  if (!apiKey && !state.aiHasServerKey) { switchWf('ai'); return toast(t('ai.keyRequired'), true); }
+  const model = $('#aiModel')?.value.trim() || 'gpt-5.5';
+  const log = (document.querySelector('.mach-console')?.textContent || '').trim();
+  if (!log) return toast(t('ai.noLog'), true);
+  const box = $('#mConsoleAi');
+  if (box) { box.classList.remove('hidden'); box.innerHTML = `<p class="muted">${t('ai.diagnosing')}</p>`; }
+  toast(t('ai.diagnosing'));
+  try {
+    const r = await api('/api/ai/diagnose', {
+      apiKey, model,
+      log: log.split('\n'),
+      config: state.result ? readConfig() : null,
+      board: state.result?.board || null,
+      stats: { tool: state.machine.tool, isolationRings: state.result?.stats?.isolationRings },
+    });
+    renderDiagnose(r);
+  } catch (err) {
+    if (box) box.innerHTML = `<div class="ai-summary">${escapeHtml(t('ai.errorLabel', { msg: err.message }))}</div>`;
+    toast(t('ai.failed', { msg: err.message }), true);
+  }
+}
+function renderDiagnose(r) {
+  const box = $('#mConsoleAi');
+  if (!box) return;
+  box.classList.remove('hidden');
+  const steps = (r.fixSteps || []).map((s) => `<li>${escapeHtml(s)}</li>`).join('');
+  const cmds = (r.commands || []).map((c) =>
+    `<div class="ai-cmd"><code>${escapeHtml(c)}</code><button class="btn small ghost" data-sendcmd="${escapeHtml(c)}">${t('ai.send')}</button></div>`).join('');
+  box.innerHTML = `<div class="ai-summary">${escapeHtml(r.summary || '')}</div>`
+    + (r.cause ? `<div class="check warn"><span class="ico">⚠</span><span>${escapeHtml(r.cause)}</span></div>` : '')
+    + (steps ? `<ol class="ai-steps">${steps}</ol>` : '')
+    + (cmds ? `<div class="ai-cmds"><b>${t('ai.cmds')}</b>${cmds}</div>` : '');
+  box.querySelectorAll('[data-sendcmd]').forEach((b) => b.addEventListener('click', () => {
+    if (!state.machine.connected) return toast(t('machine.notConnected'), true);
+    machineCommand(b.dataset.sendcmd); toast(t('machine.cmdSent'));
+  }));
+}
 function renderAiReview(review) {
   const box = $('#aiResult');
   const issues = (review.issues || []).map((i) => {
@@ -1859,6 +3137,7 @@ function reapplyLanguage() {
   renderConns();
   renderTools();
   renderAssignments();
+  renderSetupAssistant();
   drawMaterialPreview();
   if (state.result) renderAll();
   if (!state.machine.connected) setPill('off', t('machine.disconnected'));
@@ -1880,7 +3159,12 @@ function setCurrentProjectId(id) { try { localStorage.setItem(PROJ_CUR, id || ''
 // step assignment, material and layer visibility.
 function projectSnapshot() {
   const form = {};
-  for (const el of $$('[data-path]')) form[el.dataset.path] = el.type === 'checkbox' ? el.checked : el.value;
+  // vacuum.* stays OUT of the project: it is a machine-/user-level setting
+  // persisted in localStorage (makera_vacuum), not part of the board job.
+  for (const el of $$('[data-path]')) {
+    if (el.dataset.path.startsWith('vacuum.')) continue;
+    form[el.dataset.path] = el.type === 'checkbox' ? el.checked : el.value;
+  }
   return {
     v: 1, savedAt: Date.now(),
     files: state.files,
@@ -1892,12 +3176,15 @@ function projectSnapshot() {
     layers: state.layers,
     aiModel: $('#aiModel')?.value || '',
     log: state.projectLog,
+    conn: { ip: $('#mIp')?.value.trim() || '', port: Number($('#mPort')?.value) || 2222 },
   };
 }
 function hasWorkspace() {
   return !!(state.files.copper || state.files.edge || state.files.drill || state.files.silk);
 }
-function applyProject(p) {
+// opts.freshProject: true for new/load/import (reset manual ticks + monitors),
+// false when restoring the SAME project after a page reload (keep the ticks).
+function applyProject(p, { freshProject = true } = {}) {
   if (!p) return;
   state.files = { copper: null, edge: null, drill: null, silk: null };
   for (const role of ['copper', 'edge', 'drill', 'silk']) {
@@ -1906,7 +3193,11 @@ function applyProject(p) {
     if (f && f.content) { state.files[role] = { name: f.name, content: f.content }; slot.classList.add('filled'); $('[data-name]', slot).textContent = f.name; }
     else if (slot) { slot.classList.remove('filled'); $('[data-name]', slot).textContent = '—'; }
   }
+  // The placement offset is part of the project; a project without one (older
+  // snapshot / new project) falls back to the default corner position.
+  setPlacementOffset(0, 0);
   if (p.form) for (const [path, val] of Object.entries(p.form)) {
+    if (path.startsWith('vacuum.')) continue; // machine-level, localStorage-owned
     const el = document.querySelector(`[data-path="${path}"]`);
     if (!el) continue;
     if (el.type === 'checkbox') el.checked = !!val; else el.value = val;
@@ -1917,11 +3208,28 @@ function applyProject(p) {
   if (p.assignment) { state.assignment = p.assignment; saveJSON('makera_assignment', state.assignment); }
   if (p.layers) { state.layers = { ...state.layers, ...p.layers }; $$('[data-layer]').forEach((cb) => { cb.checked = !!state.layers[cb.dataset.layer]; }); }
   if (p.aiModel && $('#aiModel')) $('#aiModel').value = p.aiModel;
+  if (p.conn && p.conn.ip && $('#mIp')) {
+    $('#mIp').value = p.conn.ip;
+    if ($('#mPort')) $('#mPort').value = p.conn.port || 2222;
+    const idx = state.conns.findIndex((c) => c.ip === p.conn.ip && String(c.port) === String(p.conn.port || 2222));
+    if (idx >= 0 && $('#mProfiles')) $('#mProfiles').value = String(idx);
+  }
   state.projectLog = Array.isArray(p.log) ? p.log.slice() : [];
   renderLog();
   $('#generate').disabled = !state.files.copper;
   state.result = null;
-  state.fab.done = {}; state.fab.view = null;
+  if (freshProject) {
+    // New board = new physical setup: manual assistant/fabrication ticks and
+    // a monitored job belong to the OLD project (project-reset.js). The
+    // machine-side states (connect/home/origin/Z) stay live-detected.
+    resetProjectScopedState(state, localStorage);
+    renderHeightMapPanel();
+    renderToolChangeOverlay(state.machine.status); // overlay follows live status only
+    if (state.machine.connected) pollStatus(); // refresh the live status once
+  } else {
+    state.fab.done = {}; state.fab.view = null;
+  }
+  renderSetupAssistant();
   renderTools();
   renderAssignments();
   drawMaterialPreview();
@@ -1949,7 +3257,8 @@ function projSaveAs() {
   const projs = loadProjects();
   const id = 'p' + Date.now().toString(36);
   projs[id] = { ...projectSnapshot(), name, createdAt: Date.now() };
-  saveProjects(projs); setCurrentProjectId(id); renderProjects();
+  try { saveProjects(projs); } catch { return toast(t('proj.saveFail'), true); }
+  setCurrentProjectId(id); renderProjects();
   toast(t('proj.saved', { name }));
 }
 function projSave() {
@@ -1958,7 +3267,8 @@ function projSave() {
   if (!cur || !projs[cur]) return projSaveAs();
   const name = projs[cur].name || t('proj.defaultName');
   projs[cur] = { ...projectSnapshot(), name, createdAt: projs[cur].createdAt || Date.now() };
-  saveProjects(projs); renderProjects();
+  try { saveProjects(projs); } catch { return toast(t('proj.saveFail'), true); }
+  renderProjects();
   toast(t('proj.saved', { name }));
 }
 function projLoad(id) {
@@ -2047,6 +3357,9 @@ function init() {
     if (state.view === '3d' && state.viewer3d) state.viewer3d.setLayers(state.layers); else drawPreview();
   }));
   window.addEventListener('resize', () => { if (state.result && state.view === '2d') drawPreview(); });
+  $('#pvFit')?.addEventListener('click', fitPreview);
+  $('#pvMeasure')?.addEventListener('click', toggleMeasure);
+  bindPreviewInteraction();
 
   $('#addTool').addEventListener('click', () => {
     const n = (state.tools.reduce((m, t) => Math.max(m, t.number), 0) || 0) + 1;
@@ -2056,12 +3369,27 @@ function init() {
 
   // machine
   $('#machHeaderState').addEventListener('click', () => switchWf('machine'));
+  $('#setupAssist')?.addEventListener('click', (e) => {
+    const b = e.target instanceof Element ? e.target.closest('[data-assist]') : null;
+    if (b) setupAction(b.dataset.assist);
+  });
+  $('#dockToggle').addEventListener('click', () => toggleDock());
+  $('#dockGoMachine').addEventListener('click', () => switchWf('machine'));
+  $('#dockCopyLog').addEventListener('click', copyMachineLog);
+  $('#mConsoleCopy')?.addEventListener('click', copyMachineLog);
+  $('#mConsoleAiBtn')?.addEventListener('click', aiDiagnose);
+  $('#dockAiBtn')?.addEventListener('click', aiDiagnose);
+  if (loadJSON('makera_dock', false)) toggleDock(true);
   $('#mDiscover').addEventListener('click', machineDiscover);
   $('#mConnect').addEventListener('click', machineConnect);
   $('#mDisconnect').addEventListener('click', machineDisconnect);
   $('#mdiSend').addEventListener('click', () => { const v = $('#mdiInput').value.trim(); if (v) { machineCommand(v); $('#mdiInput').value = ''; } });
   $('#mdiInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#mdiSend').click(); });
   $$('[data-action]').forEach((b) => b.addEventListener('click', () => machineAction(b.dataset.action)));
+  // height-map chips are re-rendered in several places → delegated handler
+  document.addEventListener('click', (e) => {
+    if (e.target instanceof Element && e.target.closest('[data-hmopen]')) openHeightMapModal();
+  });
   bindJog();
   initHelpTips();
   $('#mUpload').addEventListener('click', () => machineUpload(false));
@@ -2075,6 +3403,25 @@ function init() {
   ['stock.sizeX', 'stock.sizeY', 'material.thickness'].forEach((path) => {
     const el = document.querySelector(`[data-path="${path}"]`);
     if (el) el.addEventListener('input', () => { $('#matPreset').value = 'custom'; state.matSides = 'single'; saveJSON('makera_material', 'custom'); });
+  });
+
+  // board placement (drag & drop + numeric fields, kept snapped/clamped)
+  bindMaterialDrag();
+  ['#placeOffX', '#placeOffY'].forEach((sel) => $(sel)?.addEventListener('change', () => {
+    const p = placementOffset();
+    const n = normalizePlacement(p.x, p.y);
+    setPlacementOffset(n.x, n.y);
+    drawMaterialPreview(); // regen runs via the generic data-path handler
+  }));
+  $('#placeReset')?.addEventListener('click', () => {
+    setPlacementOffset(0, 0);
+    scheduleGenerate();
+  });
+
+  // external vacuum automation settings (localStorage, machine-level)
+  loadVacuumSettings();
+  ['#vacAuto', '#vacLinger', '#vacPauseTc', '#vacLaser'].forEach((sel) => {
+    $(sel)?.addEventListener('change', saveVacuumSettings);
   });
 
   // tools
@@ -2120,8 +3467,11 @@ function init() {
 
   renderMaterialPresets();
   renderConns();
+  initDockPadding();
+  renderSetupAssistant();
   loadAiConfig();
   loadMeta();
+  restoreMachineConnection(); // reconnect to the machine after a reload / drop
   saveJSON('makera_tools', state.tools); // persist backfilled feeds/speeds
   renderTools();
   renderAssignments();
@@ -2130,10 +3480,11 @@ function init() {
   applyI18n(); // translate all static markup for the active language
   switchWf(loadJSON('makera_wf', 'material'));
 
-  // resume the last open project (full workspace) if there is one
+  // resume the last open project (full workspace) if there is one — a reload
+  // of the SAME project keeps the manual ticks (freshProject: false)
   const cur = currentProjectId();
   const projs = loadProjects();
-  if (cur && projs[cur]) applyProject(projs[cur]);
+  if (cur && projs[cur]) applyProject(projs[cur], { freshProject: false });
 }
 
 async function loadExample() {

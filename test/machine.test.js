@@ -52,6 +52,62 @@ test('parseStatus returns null without a frame', () => {
   assert.equal(parseStatus('ok'), null);
 });
 
+// ---------------------------------------------------------------------------
+// Official firmware 1.0.6 status strings, reconstructed byte-for-byte from
+// Kernel.cpp get_query_string() (v1.0.6, lines 256-489): pipe separators,
+// 5-value MPos/WPos (X,Y,Z,A,B), S with appended temperatures, manual-tool-
+// change T with the target tool as 3rd value, and the optional A/O/H fields.
+// ---------------------------------------------------------------------------
+
+test('parseStatus handles the full 1.0.6 idle report (5-axis positions, S temps, C modes)', () => {
+  const s = parseStatus(
+    '<Idle|MPos:-273.3100,-190.6400,-85.4500,0.0000,0.0000|WPos:0.0000,0.0000,0.0000,0.0000,0.0000'
+    + '|F:0.0,3000.0,100.0|S:0.0,0.0,100.0,0,24.9,25.1,0,0,0|T:0,0.000,-1|W:4.02'
+    + '|L:0, 0, 0, 0.0,100.0|C:5,0,0,1>',
+  );
+  assert.equal(s.state, 'Idle');
+  assert.deepEqual(s.mpos, [-273.31, -190.64, -85.45, 0, 0]);
+  assert.deepEqual(s.wpos, [0, 0, 0, 0, 0]);
+  assert.deepEqual(s.tool, [0, 0, -1]); // active, TLO, target (manual branch)
+  assert.equal(s.spindle.length, 9); // rpm,target,ovr,vac + 2 temps + 3 ext
+  assert.deepEqual(s.modes, [5, 0, 0, 1]); // model, funcSetting, inch, absolute
+  assert.equal(s.probe[0], 4.02); // wired probe voltage (W:)
+});
+
+test('parseStatus surfaces the leveling max deviation (O field, compensation active)', () => {
+  const s = parseStatus(
+    '<Idle|MPos:-100.0000,-100.0000,-50.0000,0.0000,0.0000|WPos:173.3100,90.6400,58.4500,0.0000,0.0000'
+    + '|F:0.0,3000.0,100.0|S:0.0,0.0,100.0,0,25.0,25.0,0,0,0|T:1,2.335,-1|O:1.366|C:5,0,0,1>',
+  );
+  assert.deepEqual(s.leveling, [1.366]); // Kernel.cpp:469-474 — max grid delta
+  assert.equal(s.tool[1], 2.335); // TLO travels in the T field
+});
+
+test('parseStatus reads the manual tool-change wait (Tool state, target tool)', () => {
+  const s = parseStatus(
+    '<Tool|MPos:-30.3100,-4.6430,-3.0000,0.0000,0.0000|WPos:243.0000,186.0000,105.4500,0.0000,0.0000'
+    + '|F:0.0,3000.0,100.0|S:0.0,0.0,100.0,0,25.0,25.0,0,0,0|T:0,0.000,1|P:12,3,45|A:2>',
+  );
+  assert.equal(s.state, 'Tool');
+  assert.equal(s.tool[2], 1); // target tool for the overlay
+  assert.deepEqual(s.play, [12, 3, 45]); // played lines, percent, seconds
+  assert.deepEqual(s.setup, [2]); // ATC state (A:)
+});
+
+test('parseStatus reads the halt reason (Alarm + H field)', () => {
+  const s = parseStatus(
+    '<Alarm|MPos:0.0000,0.0000,0.0000,0.0000,0.0000|WPos:280.3100,300.6400,171.4500,-30.0000,0.0000'
+    + '|F:0.0,0.0,100.0|S:0.0,0.0,100.0,0,25.0,25.0,0,0,0|T:1,0.000,-1|H:3|C:5,0,0,1>',
+  );
+  assert.equal(s.state, 'Alarm');
+  assert.deepEqual(s.halt, [3]);
+  // the "absurd" WPos from the incident screenshot is the machine's own
+  // arithmetic (MPos - stale EEPROM G54 offsets after a reset) — the parser
+  // must pass it through unchanged, not scramble fields.
+  assert.deepEqual(s.wpos, [280.31, 300.64, 171.45, -30, 0]);
+  assert.deepEqual(s.mpos, [0, 0, 0, 0, 0]);
+});
+
 const u32be = (n) => Buffer.from([(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff]);
 
 // Independent frame parser for the mock machine (validates the client encoder).

@@ -46,6 +46,18 @@ export function parseExcellon(text) {
     if (!slotsByTool.has(n)) slotsByTool.set(n, []);
   }
 
+  function parseCoords(line) {
+    const xm = line.match(/X([+-]?[\d.]+)/);
+    const ym = line.match(/Y([+-]?[\d.]+)/);
+    let nx = xm ? toMm(coord(xm[1])) : lastX;
+    let ny = ym ? toMm(coord(ym[1])) : lastY;
+    if (!absolute) {
+      nx = lastX + (xm ? toMm(coord(xm[1])) : 0);
+      ny = lastY + (ym ? toMm(coord(ym[1])) : 0);
+    }
+    return { nx, ny };
+  }
+
   for (let raw of lines) {
     const line = raw.trim();
     if (!line) continue;
@@ -102,9 +114,19 @@ export function parseExcellon(text) {
       continue;
     }
 
-    if (line.startsWith('G05') || line.startsWith('G01') || line.startsWith('G00')) {
-      routing = line.startsWith('G01');
+    if (line.startsWith('G05') || line.startsWith('G01')) {
+      routing = true;
       // fall through to parse any trailing coordinates on the same line
+    }
+    if (line.startsWith('G00')) {
+      routing = false;
+      routeStart = null;
+      if (currentTool != null) {
+        const { nx, ny } = parseCoords(line);
+        lastX = nx;
+        lastY = ny;
+      }
+      continue;
     }
     if (line.startsWith('M15')) {
       routing = true;
@@ -117,23 +139,29 @@ export function parseExcellon(text) {
       continue;
     }
 
+    // KiCad alternate drill mode (G85) — routed slot between two points.
+    const g85 = line.match(/X([+-]?[\d.]+)Y([+-]?[\d.]+)G85X([+-]?[\d.]+)Y([+-]?[\d.]+)/i);
+    if (g85 && currentTool != null) {
+      const x1 = toMm(coord(g85[1]));
+      const y1 = toMm(coord(g85[2]));
+      const x2 = toMm(coord(g85[3]));
+      const y2 = toMm(coord(g85[4]));
+      slotsByTool.get(currentTool).push({ x1, y1, x2, y2 });
+      lastX = x2;
+      lastY = y2;
+      continue;
+    }
+
     // Coordinate line: X..Y.. (either a drill hit or a routed move)
     const cm = line.match(/X([+-]?[\d.]+)?Y([+-]?[\d.]+)?|X([+-]?[\d.]+)|Y([+-]?[\d.]+)/);
     if (cm && currentTool != null) {
-      const xm = line.match(/X([+-]?[\d.]+)/);
-      const ym = line.match(/Y([+-]?[\d.]+)/);
-      let nx = xm ? toMm(coord(xm[1])) : lastX;
-      let ny = ym ? toMm(coord(ym[1])) : lastY;
-      if (!absolute) {
-        nx = lastX + (xm ? toMm(coord(xm[1])) : 0);
-        ny = lastY + (ym ? toMm(coord(ym[1])) : 0);
-      }
+      const { nx, ny } = parseCoords(line);
       if (routing && routeStart) {
         slotsByTool.get(currentTool).push({ x1: routeStart.x, y1: routeStart.y, x2: nx, y2: ny });
         routeStart = { x: nx, y: ny };
       } else if (routing && line.startsWith('G01')) {
         slotsByTool.get(currentTool).push({ x1: lastX, y1: lastY, x2: nx, y2: ny });
-      } else {
+      } else if (!line.startsWith('G00')) {
         holesByTool.get(currentTool).push({ x: nx, y: ny });
       }
       lastX = nx;

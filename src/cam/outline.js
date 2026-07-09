@@ -3,6 +3,8 @@
 // The Edge.Cuts strokes are stitched into continuous loops, offset to one side
 // by the cutter radius, densified, and annotated with holding tabs. The G-code
 // stage steps the depth down and ramps up over the tabs on the deep passes.
+// Inner cutouts are offset inward (opposite the outer contour) and cut before
+// the outer profile so the board stays supported until the last pass.
 
 import { offsetClosed, offsetOpen, ringArea } from '../geometry/clipper.js';
 
@@ -17,20 +19,29 @@ export function generateOutline(strokes, cfg) {
   const side = cfg.outline.offsetSide;
   const delta = side === 'inside' ? -radius : side === 'on' ? 0 : radius;
 
+  const closedMeta = closed.map((loop) => ({
+    raw: loop,
+    area: Math.abs(ringArea(loop)),
+  }));
+  closedMeta.sort((a, b) => a.area - b.area); // inner cutouts first, outer profile last
+  const outerArea = closedMeta.length ? closedMeta[closedMeta.length - 1].area : 0;
+
   const loops = [];
 
-  for (const loop of closed) {
+  for (const { raw: loop, area } of closedMeta) {
+    const isOuter = area >= outerArea * 0.999;
+    let effectiveDelta = delta;
+    if (delta !== 0 && !isOuter) effectiveDelta = -delta;
+
     let rings;
-    if (delta === 0) {
+    if (effectiveDelta === 0) {
       rings = [loop];
     } else {
-      // Offsetting a filled polygon outward keeps the board full-size and puts
-      // the tool centre outside the edge.
-      rings = offsetClosed([loop], delta);
+      rings = offsetClosed([loop], effectiveDelta);
     }
     for (const ring of rings) {
       const pts = densifyAndTab(ring, true, cfg.outline);
-      loops.push({ pts, closed: true, area: Math.abs(ringArea(ring)) });
+      loops.push({ pts, closed: true, area });
     }
   }
 
