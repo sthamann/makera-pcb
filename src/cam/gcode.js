@@ -155,6 +155,46 @@ export function emitClearingMotion(e, clearing, cfg, origin, opts = {}) {
   }
 }
 
+// Solder-mask removal: pocket-clear each pad region at a shallow depth (through
+// the thin mask to the copper), plus a plunge for pads smaller than the bit.
+// The whole pad set is traced `passes` times in one program — the cured mask
+// is uneven, so a single pass often leaves residue (this replaces re-running
+// the job by hand). Each pad is re-plunged and re-traced every pass.
+export function emitMaskMotion(e, mask, cfg, origin, opts = {}) {
+  const tx = makeTransform(origin);
+  const sm = cfg.solderMask || {};
+  const z = -Math.abs(mask.cutDepth ?? sm.cutDepth ?? 0.05);
+  const feedXY = sm.feedXY ?? 200;
+  const plungeFeed = sm.plungeFeed ?? 60;
+  const passes = Math.max(1, Math.round(sm.passes ?? 1));
+  let useSafeApproach = opts.safeFirstApproach !== false;
+  for (let pass = 0; pass < passes; pass++) {
+    if (passes > 1) e.comment(`mask pass ${pass + 1} / ${passes}`);
+    for (const ring of mask.paths) {
+      if (ring.length < 3) continue;
+      const [sx, sy] = tx(ring[0][0], ring[0][1]);
+      e.g0(null, null, useSafeApproach ? cfg.safeZ : cfg.travelZ);
+      e.g0(sx, sy, null);
+      e.g1(null, null, z, plungeFeed);
+      for (let i = 1; i < ring.length; i++) {
+        const [px, py] = tx(ring[i][0], ring[i][1]);
+        e.g1(px, py, null, feedXY);
+      }
+      e.g1(sx, sy, null, feedXY);
+      e.g0(null, null, cfg.travelZ);
+      useSafeApproach = false;
+    }
+    for (const [px0, py0] of (mask.plunges || [])) {
+      const [x, y] = tx(px0, py0);
+      e.g0(null, null, useSafeApproach ? cfg.safeZ : cfg.travelZ);
+      e.g0(x, y, null);
+      e.g1(null, null, z, plungeFeed);
+      e.g0(null, null, cfg.travelZ);
+      useSafeApproach = false;
+    }
+  }
+}
+
 export function emitDrillMotion(e, group, cfg, origin) {
   const tx = makeTransform(origin);
   const depth = group.depth;
@@ -235,6 +275,27 @@ export function clearingGcode(clearing, cfg, origin, tool = null) {
   spindleOn(e, tool?.rpm ?? cfg.clearing.rpm);
   vacuumOn(e, cfg);
   emitClearingMotion(e, clearing, cfg, origin, { safeFirstApproach: true });
+  footer(e, cfg);
+  return e.toString();
+}
+
+export function maskGcode(mask, cfg, origin, tool = null) {
+  const e = new Emitter();
+  const n = mask.paths.length + (mask.plunges?.length || 0);
+  const passes = Math.max(1, Math.round(cfg.solderMask?.passes ?? 1));
+  fileHeader(e, `solder-mask removal (${mask.toolDiameter.toFixed(2)} mm mask tool, ${n} pads, ${passes}× pass)`);
+  // Mirrors Makera's own LED example (CopperCAM "PCB-UV-MASK(PART2)"): the UV
+  // solder-mask bit is loaded via a normal M6 tool change WITH automatic tool-
+  // length measurement — the reference file does exactly `T5 M06` — then the
+  // pad openings are traced once at a shallow depth. Z0 is the copper surface
+  // from the isolation step; M6 measures the mask tool against that same zero,
+  // so the cut depth is repeatable (no fragile manual paper-zeroing).
+  e.comment('Apply & cure the UV mask before running this step.');
+  e.g0(null, null, cfg.safeZ);
+  emitToolChange(e, tool); // M5 + M6 Tn (pause, insert mask tool, auto length measure)
+  spindleOn(e, tool?.rpm ?? cfg.solderMask?.rpm ?? 6000);
+  vacuumOn(e, cfg);
+  emitMaskMotion(e, mask, cfg, origin, { safeFirstApproach: true });
   footer(e, cfg);
   return e.toString();
 }

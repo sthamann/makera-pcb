@@ -96,8 +96,8 @@ export function buildReport({ cfg, board, iso, drill, outline, checks, files, wa
       '- Roller und Werkzeuge sofort mit Alkohol reinigen.',
     ]);
     step('Lötstopplack von den Pads entfernen', [
-      `- ⏸ **Werkzeug wechseln:** ${toolLabel('maskRemove', 'Lötstopplack-Entfernungsfräser (No.5, spring-loaded)')}. Z sorgfältig antasten (bei Federfräser ggf. manuell auf Z0 über dem Board setzen).`,
-      '- Freilegt nur die Pad-/Bohrflächen, damit sie lötbar sind.',
+      `- ⏸ **Werkzeug laden (federgelagert):** ${toolLabel('maskRemove', 'Lötstopplack-Entfernungsfräser (No.5, spring-loaded)')} über das Tool-Menü **OHNE** automatische Werkzeuglängen-Messung (sonst „unexpected probe trigger").`,
+      '- **Z=0 von Hand** auf dem Kupfer setzen (Papier-Methode), dann `1c_soldermask_removal.nc` starten – reine XY-Fahrt (kein M6). Freilegt nur die Pad-/Bohrflächen; bei Restlack einfach erneut laufen lassen.',
     ]);
   }
 

@@ -134,7 +134,22 @@ export const defaultConfig = {
 
   solderMask: {
     enable: false, // include the UV solder-mask steps in the guided workflow
-    // (apply UV paint -> cure -> mill it off the pads with the removal bit)
+    // (apply UV paint -> cure -> mill it off the pads with the removal bit).
+    // Pad areas are DERIVED from copper + drills (no F.Mask layer needed).
+    // Parameters mirror Makera's own LED example (CopperCAM "PCB-UV-MASK(PART2)",
+    // downloaded from the machine and analysed 1:1): the 0.3 mm/30° mask tool is
+    // loaded via a normal M6 tool change WITH automatic tool-length measurement,
+    // then each pad opening is traced ONCE at a shallow depth. Z0 is the copper
+    // surface from the isolation step; M6 measures the mask tool against it.
+    cutDepth: 0.2, // mm below Z0 — Makera's reference uses exactly Z-0.2
+    padDetectRadius: 0.3, // opening radius (mm): copper wider than 2× survives as a pad
+    padMaxAreaMm2: 12, // drop copper islands bigger than this (ground pours)
+    padRing: 0.3, // mm exposed around a drilled hole (through-hole annular ring)
+    stepoverFrac: 0.4, // pocket-fill overlap as a fraction of the bit diameter
+    passes: 1, // Makera traces every pad once (M6-measured depth is repeatable)
+    feedXY: 250, // mm/min engraving feed (Makera reference: F250)
+    plungeFeed: 200, // mm/min plunge (Makera reference: F200)
+    rpm: SOLDER_MASK_REMOVER_RPM,
   },
 };
 

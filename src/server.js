@@ -234,6 +234,91 @@ app.post('/api/machine/run', async (req, res) => {
   }
 });
 
+// ---------------- SD file browser ----------------
+// Browse, download, upload, create, rename and delete files on the machine's
+// SD card. Download/list run over the SimpleShell console (cat/ls), upload
+// reuses the framed file transfer. All of these are text-oriented (the PCB
+// workflow only ever moves G-code / Gerber / drill / config text files).
+app.get('/api/machine/files', async (req, res) => {
+  try {
+    if (!conn?.connected) return res.status(400).json({ error: 'not connected' });
+    const path = String(req.query?.path || '/sd');
+    const entries = await conn.list(path);
+    res.json({ ok: true, path, entries });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/machine/file', async (req, res) => {
+  try {
+    if (!conn?.connected) return res.status(400).json({ error: 'not connected' });
+    const path = String(req.query?.path || '');
+    if (!path) return res.status(400).json({ error: 'path required' });
+    const buf = await conn.download(path);
+    const name = path.slice(path.lastIndexOf('/') + 1);
+    if (req.query?.raw === '1') {
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/[^\w.\- ]/g, '_')}"`);
+      return res.send(buf);
+    }
+    res.json({ ok: true, path, name, size: buf.length, content: buf.toString('latin1') });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/machine/file/upload', async (req, res) => {
+  try {
+    if (!conn?.connected) return res.status(400).json({ error: 'not connected' });
+    const { path, contentBase64, content } = req.body || {};
+    if (!path) return res.status(400).json({ error: 'path required' });
+    const buf = contentBase64 != null
+      ? Buffer.from(String(contentBase64), 'base64')
+      : Buffer.from(String(content ?? ''), 'utf8');
+    const result = await conn.upload(path, buf);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/machine/file/mkdir', async (req, res) => {
+  try {
+    if (!conn?.connected) return res.status(400).json({ error: 'not connected' });
+    const path = String(req.body?.path || '');
+    if (!path) return res.status(400).json({ error: 'path required' });
+    await conn.makeDir(path);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/machine/file/rename', async (req, res) => {
+  try {
+    if (!conn?.connected) return res.status(400).json({ error: 'not connected' });
+    const { from, to } = req.body || {};
+    if (!from || !to) return res.status(400).json({ error: 'from and to required' });
+    await conn.rename(String(from), String(to));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/machine/file/delete', async (req, res) => {
+  try {
+    if (!conn?.connected) return res.status(400).json({ error: 'not connected' });
+    const path = String(req.body?.path || '');
+    if (!path) return res.status(400).json({ error: 'path required' });
+    await conn.remove(path);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // ---------------- AI config review (OpenAI) ----------------
 app.get('/api/ai/config', (req, res) => {
   res.json({ hasKey: !!process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL || 'gpt-4o-mini' });

@@ -174,6 +174,13 @@ sind der Reihe nach gegated — ein späterer Schritt fragt vorher explizit nach
    alte Klartext-Firmware). Danach: Live-Status, MDI, **Hochladen** und **Hochladen & Start (play)**.
 3. **Verbindungsprofile** — IP/Port als benanntes Profil speichern.
 
+**SD-Datei-Browser** (aufklappbar im Maschinen-Tab): durchsucht die SD-Karte der Maschine
+(`ls`), zeigt Text-Dateien direkt an und lädt sie herunter (`cat`, TCP-zuverlässig, ohne
+QuickLZ – für G-Code/Gerber/Bohr/`config.txt`), lädt eigene Dateien in den aktuellen Ordner
+hoch (Framing-Datei-Transfer), legt Ordner an, benennt um und löscht. Damit lassen sich z. B.
+die mitgelieferten Makera-Beispiele unter `Examples/…` inspizieren
+(etwa `Examples/LED/PCB-UV-MASK(PART2).nc`).
+
 Ganz oben im Maschinen-Tab führt ein **Setup-Assistent** mit Zustands-Erkennung durch jedes
 neue Projekt: 1 Verbinden → 2 Referenzfahrt/Alarm (mit „Alarm quittieren“-Button) →
 3 Platine an Anker 1 einlegen → 4 Nullpunkt setzen → 5 Z antasten & Auto-Leveling →

@@ -90,6 +90,21 @@ export function encodeFrame(ptype, data) {
 const u32be = (n) => Buffer.from([(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff]);
 const u16be = (n) => Buffer.from([(n >> 8) & 0xff, n & 0xff]);
 
+// The SimpleShell splits command arguments on spaces, so paths are escaped with
+// the same control-byte scheme the firmware unescapes: space->0x01, ?->0x02,
+// &->0x03, !->0x04, ~->0x05.
+const SHELL_ESC = [[' ', '\x01'], ['?', '\x02'], ['&', '\x03'], ['!', '\x04'], ['~', '\x05']];
+export function escapeShellPath(p) {
+  let s = String(p);
+  for (const [plain, code] of SHELL_ESC) s = s.split(plain).join(code);
+  return s;
+}
+export function unescapeShellPath(p) {
+  let s = String(p);
+  for (const [plain, code] of SHELL_ESC) s = s.split(code).join(plain);
+  return s;
+}
+
 // Incremental byte-wise decoder for the framed protocol. onFrame(ptype, data)
 // is invoked for every CRC-valid frame; malformed frames are dropped.
 class FrameDecoder {
@@ -276,6 +291,7 @@ export class CarveraConnection extends EventEmitter {
     this.lastError = null;
     this.lastAlarm = null;
     this._fileHandler = null;
+    this._rawTap = null; // when set, console output is siphoned here (see runShell)
     this._decoder = new FrameDecoder((p, d) => this._handleFrame(p, d));
     // Safety net: never let an unlistened 'error' event crash the process.
     this.on('error', () => {});
@@ -423,6 +439,10 @@ export class CarveraConnection extends EventEmitter {
       if (this._fileHandler) this._fileHandler(ptype, data);
       return;
     }
+    // Status frames are always parsed so the live position keeps flowing even
+    // during a shell capture; every other console frame (ls/cat/echo output)
+    // is siphoned raw to the active tap so file bytes survive verbatim.
+    if (ptype !== PTYPE_STATUS_RES && this._rawTap) { this._rawTap(data.toString('latin1')); return; }
     // text-bearing frames: status / diagnose / normal info / load / etc.
     this._ingestText(data.toString('latin1'));
   }
@@ -459,15 +479,23 @@ export class CarveraConnection extends EventEmitter {
     if (this._textBuf.length > 8192) this._textBuf = this._textBuf.slice(-4096);
   }
 
-  // Upload a text/gcode payload to /sd/gcodes/<name>.
-  upload(name, content) {
+  // Upload a text/gcode payload. `nameOrPath` may be a bare filename (stored
+  // under /sd/gcodes) or an absolute /sd/... path (used by the file browser to
+  // write into any directory). `content` may be a string or a Buffer.
+  upload(nameOrPath, content) {
     return new Promise((resolve, reject) => {
       if (!this.connected) return reject(new Error('not connected'));
       if (this.xmitting) return reject(new Error('busy uploading'));
       if (this.mode === 'detecting') return reject(new Error('protocol not detected yet'));
-      const safe = name.replace(/[^\w.\-]/g, '_');
-      const path = `/sd/gcodes/${safe}`;
-      const buffer = Buffer.from(content, 'utf8');
+      let path;
+      if (typeof nameOrPath === 'string' && nameOrPath.startsWith('/')) {
+        const dir = nameOrPath.slice(0, nameOrPath.lastIndexOf('/') + 1);
+        const base = nameOrPath.slice(nameOrPath.lastIndexOf('/') + 1).replace(/[^\w.\- ]/g, '_');
+        path = dir + base;
+      } else {
+        path = `/sd/gcodes/${String(nameOrPath).replace(/[^\w.\-]/g, '_')}`;
+      }
+      const buffer = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
       const md5hex = crypto.createHash('md5').update(buffer).digest('hex');
 
       this.xmitting = true;
@@ -541,7 +569,7 @@ export class CarveraConnection extends EventEmitter {
     };
 
     // Kick off: announce the upload target, then present the md5.
-    this._writeRaw(encodeFrame(PTYPE_FILE_START, Buffer.from(`upload ${path}\n`)));
+    this._writeRaw(encodeFrame(PTYPE_FILE_START, Buffer.from(`upload ${escapeShellPath(path)}\n`)));
     sendFrame(PTYPE_FILE_MD5, Buffer.from(md5hex));
   }
 
@@ -551,7 +579,7 @@ export class CarveraConnection extends EventEmitter {
     for (let i = 0; i < buffer.length; i += BLOCK_SIZE) {
       chunks.push(buffer.subarray(i, Math.min(buffer.length, i + BLOCK_SIZE)));
     }
-    this._writeRaw(`upload ${path}\n`);
+    this._writeRaw(`upload ${escapeShellPath(path)}\n`);
     this._xmodemSend(chunks).then(() => done(null)).catch((err) => done(err));
   }
 
@@ -610,5 +638,196 @@ export class CarveraConnection extends EventEmitter {
 
       socket.on('data', onData);
     });
+  }
+
+  // Run a SimpleShell command and capture its raw console output. A unique
+  // sentinel is echoed right after the command; because the firmware runs
+  // console commands strictly in order, the sentinel is guaranteed to arrive
+  // after the command's full output, giving us a reliable end marker without
+  // relying on EOT handling. Status frames keep flowing (position stays live).
+  runShell(command, { timeout = 20000 } = {}) {
+    return new Promise((resolve, reject) => {
+      if (!this.connected) return reject(new Error('not connected'));
+      if (this.xmitting) return reject(new Error('busy'));
+      if (this.mode === 'detecting') return reject(new Error('protocol not detected yet'));
+      const sentinel = 'CV' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      const marker = 'echo: ' + sentinel;
+      let raw = '';
+      let done = false;
+      const finish = (err, val) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        this._rawTap = null;
+        this.xmitting = false;
+        this._startPolling();
+        if (err) reject(err); else resolve(val);
+      };
+      const timer = setTimeout(() => finish(new Error(`shell timeout: ${command}`)), timeout);
+      if (timer.unref) timer.unref();
+
+      this.xmitting = true; // block polling + concurrent transfers
+      this._stopPolling();
+      this._rawTap = (text) => {
+        raw += text;
+        const idx = raw.indexOf(marker);
+        if (idx >= 0) finish(null, raw.slice(0, idx));
+      };
+      const write = (line) => {
+        const s = line.endsWith('\n') ? line : line + '\n';
+        if (this.mode === 'plain') this._writeRaw(s);
+        else this._writeRaw(encodeFrame(PTYPE_CTRL_MULTI, Buffer.from(s, 'latin1')));
+      };
+      write(command);
+      write('echo ' + sentinel);
+    });
+  }
+
+  // List a directory. Returns [{ name, size, isDir, timestamp }]. Uses `ls -s`
+  // which prints "name[/] size YYYYMMDDhhmmss" per entry (dirs get a trailing
+  // slash and size 0); spaces in names arrive as 0x01 and are unescaped here.
+  async list(path = '/sd') {
+    const clean = path.replace(/\/+$/, '') || '/';
+    const raw = await this.runShell(`ls -s ${escapeShellPath(clean)}`);
+    if (/Could not open directory/i.test(raw)) throw new Error(`cannot open directory: ${path}`);
+    const entries = [];
+    for (const rawLine of raw.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const m = line.match(/^(.*?)\s+(\d+)\s+(\d{12,14})$/);
+      if (!m) continue;
+      let name = unescapeShellPath(m[1]);
+      const isDir = name.endsWith('/');
+      if (isDir) name = name.slice(0, -1);
+      if (!name || name === '.' || name === '..') continue;
+      entries.push({ name, size: isDir ? 0 : Number(m[2]), isDir, timestamp: m[3] });
+    }
+    entries.sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1));
+    return entries;
+  }
+
+  // Download a file. Current firmware (framed) uses the framed file transfer
+  // (the inverse of upload — we pull VIEW then each DATA block by sequence).
+  // Legacy plain firmware streams the file as text via `cat`.
+  download(path) {
+    return new Promise((resolve, reject) => {
+      if (!this.connected) return reject(new Error('not connected'));
+      if (this.xmitting) return reject(new Error('busy'));
+      if (this.mode === 'detecting') return reject(new Error('protocol not detected yet'));
+      if (this.mode !== 'framed') {
+        this.runShell(`cat ${escapeShellPath(path)}`, { timeout: 120000 })
+          .then((raw) => {
+            if (/^File not found:/m.test(raw)) reject(new Error(`file not found: ${path}`));
+            else resolve(Buffer.from(raw, 'latin1'));
+          })
+          .catch(reject);
+        return;
+      }
+      this.xmitting = true;
+      this._stopPolling();
+      const done = (err, buf) => {
+        this.xmitting = false;
+        this._fileHandler = null;
+        this._startPolling();
+        if (err) reject(err); else resolve(buf);
+      };
+      this._downloadFramed(path, done);
+    });
+  }
+
+  // Framed file download. Mirrors _uploadFramed but with the roles reversed:
+  // here WE are the receiver and drive the transfer, requesting the md5, then
+  // VIEW (total blocks + packet size), then each DATA block by 1-based
+  // sequence; the machine answers each request. Returns the reassembled bytes.
+  _downloadFramed(path, done) {
+    const trace = process.env.MACHINE_TRACE ? (dir, p, n) => console.error(`  DL ${dir} ptype=0x${p.toString(16)} len=${n}`) : null;
+    let total = 0;
+    let packetSize = BLOCK_SIZE;
+    let md5hex = null;
+    let finished = false;
+    let timer = null;
+    let lastFrame = null;
+    const chunks = new Map();
+
+    const arm = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => finish(new Error('download timeout')), 15000);
+      if (timer.unref) timer.unref();
+    };
+    const finish = (err, buf) => {
+      if (finished) return;
+      finished = true;
+      if (timer) clearTimeout(timer);
+      done(err || null, buf || null);
+    };
+    const assemble = () => {
+      const parts = [];
+      for (let i = 1; i <= total; i++) parts.push(chunks.get(i) || Buffer.alloc(0));
+      return Buffer.concat(parts);
+    };
+    const req = (ptype, data) => {
+      lastFrame = encodeFrame(ptype, data || Buffer.alloc(0));
+      if (trace) trace('>', ptype, data ? data.length : 0);
+      this._writeRaw(lastFrame);
+      arm();
+    };
+
+    this._fileHandler = (ptype, data) => {
+      if (finished) return;
+      if (trace) trace('<', ptype, data.length);
+      arm();
+      switch (ptype) {
+        case PTYPE_FILE_CAN:
+          finish(new Error('download canceled by machine'));
+          break;
+        case PTYPE_FILE_RETRY:
+          if (lastFrame) { this._writeRaw(lastFrame); arm(); }
+          break;
+        case PTYPE_FILE_MD5:
+          md5hex = data.toString('latin1').trim();
+          req(PTYPE_FILE_VIEW); // acknowledge md5, ask for metadata
+          break;
+        case PTYPE_FILE_VIEW:
+          total = data.length >= 4 ? data.readUInt32BE(0) : 0;
+          packetSize = data.length >= 6 ? data.readUInt16BE(4) : BLOCK_SIZE;
+          if (total <= 0) { finish(null, Buffer.alloc(0)); break; }
+          req(PTYPE_FILE_DATA, u32be(1));
+          break;
+        case PTYPE_FILE_DATA: {
+          const seq = data.length >= 4 ? data.readUInt32BE(0) : 1;
+          chunks.set(seq, data.subarray(4));
+          this.emit('download-progress', { seq, total });
+          if (seq >= total) { req(PTYPE_FILE_END); finish(null, assemble()); }
+          else req(PTYPE_FILE_DATA, u32be(seq + 1));
+          break;
+        }
+        case PTYPE_FILE_END:
+          finish(null, assemble());
+          break;
+      }
+    };
+
+    // Kick off: announce the download target, then request the md5. The machine
+    // may also push the md5 unprompted — either way the handler drives on.
+    this._writeRaw(encodeFrame(PTYPE_FILE_START, Buffer.from(`download ${escapeShellPath(path)}\n`)));
+    if (trace) trace('>', PTYPE_FILE_START, 0);
+    req(PTYPE_FILE_MD5);
+  }
+
+  async makeDir(path) {
+    await this.runShell(`mkdir ${escapeShellPath(path)}`);
+    return true;
+  }
+
+  async remove(path) {
+    const raw = await this.runShell(`rm ${escapeShellPath(path)}`);
+    if (/Could not delete/i.test(raw)) throw new Error(`could not delete: ${path}`);
+    return true;
+  }
+
+  async rename(from, to) {
+    const raw = await this.runShell(`mv ${escapeShellPath(from)} ${escapeShellPath(to)}`);
+    if (/Could not|error/i.test(raw)) throw new Error(`could not rename: ${from}`);
+    return true;
   }
 }

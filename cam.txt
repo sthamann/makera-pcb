@@ -1,0 +1,94 @@
+Die Recherche ist abgeschlossen — hier der Bericht.
+
+---
+
+# Minikamera am Werkzeugkopf der Carvera Air: Machbarkeit, Hardware, Bauplan
+
+## Kurz-Empfehlung
+
+**Kauf:** eine kleine **USB-UVC-Autofokus-Kamera** (z. B. [ELP 8MP IMX179 Autofokus-Modul, 38×38 mm, ~40–60 €](https://www.webcamerausb.com/elp-8mp-autofocus-usb-camera-free-driver-webcam-uvc-with-no-distortion-hd-lens-super-mini-web-camera-module-imx179-camera-usb20-for-atm-machine-kiosk-industrial-embedded-camera-module-p-413.html) oder als schlanke Alternative ein [Teslong MS100-Endoskop, ~40 €](https://ewhiteowls.com/2021/05/how-to-catch-datum-in-desktop-cnc-milling-with-an-affordable-microscope/)) plus ein kleiner LED-Ring (~5 €). **Kein ToF-Sensor** — dazu unten mehr. Drucke einen starren Halter, der den vorhandenen Schrauben des Vakuumschuh-/Probe-Halters am Kopf nutzt (fertige Basis-Designs existieren auf Printables). Distanzmessung braucht die Kamera nicht: **die Maschine kennt ihr Z selbst** (Wired Probe + Höhenkarte), die Kamera liefert nur XY-Vision. Realistisch erreichbar: **~0,1 mm mit einfacher Kamera, ~0,05 mm mit der 8MP-Kamera und sauberer Kalibrierung** — genug für doppelseitige Platinen. Gesamtbudget Phase 1: **unter 100 €**.
+
+---
+
+## 1. Sensor- und Kamera-Optionen
+
+### Kameras
+
+| Option | Preis | Eignung für diesen Einsatz |
+|---|---|---|
+| [ELP 8MP IMX179 USB-Modul (AF)](https://www.webcamerausb.com/elp-8mp-autofocus-usb-camera-free-driver-webcam-uvc-with-no-distortion-hd-lens-super-mini-web-camera-module-imx179-camera-usb20-for-atm-machine-kiosk-industrial-embedded-camera-module-p-413.html) | 30–65 € | **Empfehlung.** 3264×2448 px, Autofokus ab ~5 cm, verzeichnungsarme Optik, UVC (treiberlos, macOS/Linux), 38×38 mm oder [Streifenform 62×9 mm](https://www.webcamerausb.com/elp-8mp-autofocus-usb-camera-super-mini-board-imx179-usb20-lightburn-camera-with-microphone-ultra-hd-embedded-usb-camera-for-pc-p-454.html). Bei 60 mm Abstand und 62°-FOV: ~0,02 mm/Pixel — sehr viel Auflösungsreserve. |
+| USB-Endoskop/Mikroskop (z. B. Teslong MS100) | ~40 € | Bewährter Klassiker fürs CNC-Nullen ([White Owls-Anleitung](https://ewhiteowls.com/2021/05/how-to-catch-datum-in-desktop-cnc-milling-with-an-affordable-microscope/), [Hackaday](https://hackaday.com/2015/03/16/microscope-camera-for-zeroing-cnc-machines/), [Beatty Robotics](https://beatty-robotics.com/zeroing-a-cnc/)). Ø 8 mm, LED-Ring integriert, sehr nah fokussierbar. Nachteil: kleines Sichtfeld → gut zum Anfahren von Punkten, schlecht für „ganze Platine auf einen Blick". |
+| [Raspberry Pi Camera Module 3](https://www.raspberrypi.com/news/new-autofocus-camera-modules/) + Pi Zero 2 W | 25–35 € + ~20 € | Gute Optik (12MP, PDAF, Wide-Variante fokussiert ab 5 cm), aber: braucht einen eigenen Pi als Streaming-Rechner im Gehäuse, Stromversorgung, und der [AF-Motor ist vibrationsempfindlich](https://blog.arducam.com/official-camera-module-3-a-closer-look/). Nur sinnvoll, wenn man das Kabel durchs Gehäuse partout vermeiden will (Stream über WLAN). |
+| [ESP32-CAM (OV2640)](https://www.espboards.dev/blog/esp32-camera-modules-compared/) | 5–12 € | **Abraten.** 2MP, Fixfokus ab Werk auf 120–150 cm (Objektiv müsste man aufdrehen), verrauscht, JPEG-Artefakte. Für Präzisions-Vision ungeeignet; taugt höchstens als Beobachtungskamera. |
+| [OpenMV Cam RT1062](https://openmv.io/products/openmv-cam-rt) | ~120–150 $ | Onboard-Vision (AprilTag-Erkennung in MicroPython) — elegant, aber [AprilTags laufen nur mit 1–5 FPS](https://www.dfrobot.com/product-2804.html), und da euer Node-Server sowieso auf dem Mac läuft, ist Onboard-Processing hier unnötig. Teurer ohne Mehrwert. |
+| Industrie-USB-Mikroskopkameras (z. B. [GES CNC Camera](https://www.cnccamera.nl/)-Setups) | 100–400 € | Referenzklasse; kommerziell gelöst als „CNC Camera Assistent" mit Sub-mm-Ausrichtung. Für die Carvera Air überdimensioniert — dieselbe Genauigkeit erreicht man mit der ELP-Kamera + eigener Software. |
+
+**Wichtig für die Umgebungsbedingungen:** Gemessen wird immer **im Stillstand bei stehender Spindel** — Vibration ist also fürs Messen kein Problem, nur für die mechanische Dauerhaltbarkeit des Halters (starr drucken, kurzer Hebel). FR4-Staub ist das größere Thema: Linse nach unten, geschlossenes gedrucktes Gehäuse, nur ein kleines Fenster, vor jeder Messung Druckluftstoß (Air Assist ist ja vorhanden).
+
+### Distanzmessung — und warum sie (fast) entfallen kann
+
+| Technik | Realistische Genauigkeit | Urteil |
+|---|---|---|
+| ToF [VL53L0X/L1X/L4CD](https://learn.sparkfun.com/tutorials/qwiic-distance-sensor-vl53l1x-vl53l4cd-hookup-guide) (3–10 €) | Auflösung 1 mm, **Genauigkeit ±5–7 mm**, VL53L4CD [unterhalb ~20 mm nichtlinear](https://stcommunity.st.com/t5/imaging-sensors/vl53l1x-calibration-effect/td-p/734532), Messfleck mehrere mm² (18° FOV) | **Unbrauchbar.** PCB-Fräsen braucht 0,01–0,05 mm in Z. ToF ist 100× zu grob und liefert null XY-Information. |
+| Laser-Triangulation ([Panasonic HG-C1030](https://industry.panasonic.com/ap/en/products/fasys/sensor/photoelectric/hg-c): 30±5 mm, 10 µm Wiederholgenauigkeit) | 10–30 µm | Technisch top, aber **200–670 €**, 24-V-Versorgung, Analogauswertung — und misst nur Z, was der Wired Probe + Höhenkarte **bereits besser und gratis** erledigt (Antasten misst die echte Oberfläche, nicht die Reflexion). |
+| Kapazitiv/induktiv | µm-Bereich, aber nur leitfähige Flächen / winzige Abstände | Für Kupfer denkbar, aber Kalibrieraufwand hoch, kein XY — gleiche Begründung wie oben: redundant zum Probe. |
+| Stereo / Structured Light | — | Zu groß und zu teuer fürs Gehäuse; für planare Platinen komplett überdimensioniert. |
+| **Kamera + Maschinen-Z** | siehe Abschnitt 4 | **Der richtige Ansatz.** Die Platine ist eine Ebene, deren Höhe die Maschine per Probe exakt kennt. Bei bekanntem Z ist der mm/px-Maßstab der Kamera konstant → aus einem 2D-Bild werden metrische XY-Koordinaten. Eine separate Distanzmessung ist überflüssig. |
+
+### Fertige Lösungen als Blaupause
+
+- **[LPKF ProtoMat](https://www.lpkf.com/fileadmin/mediafiles/user_upload/products/pdf/DQ/DQ_TechGuide_EN.pdf)** (Profi-Referenz): bohrt [1,5-mm-Fiducial-Löcher, die die integrierte Kamera nach dem Wenden wiederfindet](https://my.dev.vanderbilt.edu/daniel/chapter-4-preparing-lpkf-circuitpro/) und daraus Verschiebung + Verdrehung kompensiert. **Genau dieser Workflow ist das Vorbild für Phase 2.**
+- **[kTAMV](https://github.com/TypQxQ/kTAMV) / [TAXY](https://github.com/PrintStructor/TAXY)** (Klipper): Kamera + OpenCV bestimmen Düsen-Offsets automatisch; die Kalibrierlogik (Kopf um bekannte Distanzen bewegen, Feature in Pixeln tracken, Affinmatrix per Least-Squares) ist 1:1 übertragbar.
+- **[OpenCNCPilot-Fiducial-Fork](https://github.com/gdipaolo11111/OpenCNCPilot_Fiducial_Registration_Alignment)**: 2-Punkt-Registrierung (Translation + Rotation + optional Skalierung) mit USB-Mikroskop — inkl. des Kamera-Offset-Kalibrierrezepts „Marke fräsen → Kamera drüberfahren".
+- **[LightBurn-Kamera](https://docs.lightburnsoftware.com/2.1/Reference/Cameras/Alignment/)**: lehrt vor allem eine Lektion — die Kalibrierung gilt [nur für die Höhe, auf der kalibriert wurde](https://forum.lightburnsoftware.com/t/camera-alignment-is-accurate-only-with-the-4-targets-but-not-anything-else-you-add/31878) (Parallaxe). Am bewegten Kopf mit bekanntem Z umgeht ihr das elegant.
+- **Bantam Tools** löst Registrierung übrigens **ohne** Kamera über angetastete L-Winkel — konzeptionell das, was ihr mit Anker 1 heute schon macht. Die Kamera ersetzt/ergänzt genau diesen manuellen Schritt.
+- Für die Carvera gibt es bereits Community-Halter: [USB-Kamera-Mount für die Carvera](https://www.printables.com/model/1006342-carvera-usb-camera-mount) (Arducam IMX291, Kabelführung intern) und für die **Air** mehrere Kopf-Halter, die Vakuumschuh-/Probe-Halterschrauben nutzen ([MagSafe](https://www.printables.com/model/1376194-carvera-air-magsafe-mount-for-filming), [GoPro](https://www.printables.com/model/1376234-carvera-air-gopro-mount), [8-mm-Rundstab-System](https://www.printables.com/model/1521025-carvera-air-rod-mount-system)) — perfekte Vorlage für einen eigenen Kamerahalter.
+
+## 2. Was damit für den PCB-Workflow möglich wäre (priorisiert)
+
+1. **Vision-Nullpunkt statt Anker-Blindflug (größter Nutzen/Aufwand-Quotient):** Kamera über die Rohlings-Ecke fahren, Fadenkreuz in der Web-UI, Klick → App rechnet Kamera-Offset drauf und setzt `G10 L20 P0` — die Infrastruktur (`setOriginAtAnchorOffsetCommands`, `/api/machine/command`) existiert in `machine-commands.js`/`server.js` bereits. Erlaubt auch Rohlinge, die *nicht* exakt am Anker liegen.
+2. **Doppelseitiges Ausrichten à la LPKF:** vor dem Wenden 3–4 Passlöcher bohren (Werkzeug ist eh da), nach dem Wenden findet die Kamera die Löcher, App berechnet Verschiebung + Rotation und transformiert den Nullpunkt (oder warnt bei zu großer Verdrehung). Das ist der Punkt, an dem manuelles Arbeiten heute am fehleranfälligsten ist.
+3. **Automatische Rohling-Erkennung:** Kupferoberfläche hat starken Kontrast zur Opferplatte; Kantenerkennung (Canny + Hough) findet die Rohlingskanten, App prüft „passt das Layout aufs Material?" (euer `stock-fit` existiert schon als manuelle Variante) und schlägt den Nullpunkt vor.
+4. **Fräsergebnis-Inspektion:** nach dem Isolationsfräsen Raster abfahren, Fotos stitchen, Rillen auf Unterbrechung/Grate prüfen (erst mal nur als Bildergalerie für den Menschen — schon das spart die Lupe).
+5. **Werkzeugbruch-Erkennung:** Kopf auf feste Inspektionspose fahren, Werkzeugsilhouette vor hellem Hintergrund prüfen (Länge/vorhanden). Machbar mit derselben Kamera, aber niedrige Priorität — der Air hat wenig Werkzeugbrüche bei PCB-Feeds, und die Geometrie (seitlich montierte Kamera schaut nach unten) passt nur mit Spiegel oder zweiter Pose.
+6. **Auto-Kalibrierung** über gefräste/gedruckte Marker auf der Opferplatte (Abschnitt 3, Phase 3).
+
+## 3. Konkreter Bauvorschlag
+
+### Hardware (~85–110 €)
+
+- **[ELP-USB8MP04AF (IMX179, AF, 38×38 mm)](https://www.webcamerausb.com/elp-8mp-autofocus-usb-camera-free-driver-webcam-uvc-with-no-distortion-hd-lens-super-mini-web-camera-module-imx179-camera-usb20-for-atm-machine-kiosk-industrial-embedded-camera-module-p-413.html)** ~40–60 € (auf [Alibaba/AliExpress ab ~30 €](https://www.alibaba.com/product-detail/ELP-8MP-Autofocus-Lens-Mini-Strip_1601332717646.html)). Autofokus einmalig auf Arbeitsabstand festsetzen (UVC erlaubt manuellen Fokus-Lock) — AF darf **nicht** pro Messung neu fokussieren, sonst ändert sich die Bildgeometrie leicht.
+- **Mini-LED-Ring** (5 V, ~5 €) um die Linse — konstante Beleuchtung schlägt jede Software-Robustheit.
+- **3D-gedruckter Halter** an den Schraubpunkten des Vakuumschuh-/Probe-Halters (Vorlage: [Rod-Mount](https://www.printables.com/model/1521025-carvera-air-rod-mount-system) / [GoPro-Mount](https://www.printables.com/model/1376234-carvera-air-gopro-mount)). Worauf achten:
+  - **Starr und kurz** (PETG/ASA, ≥3 mm Wandstärke, kein Gelenk!) — jeder Halter-Flex geht 1:1 in die Kalibrierung.
+  - Kamera **seitlich versetzt, Blick senkrecht nach unten**, Objektiv ~50–70 mm über der Platinenoberfläche bei typischer Arbeits-Z-Höhe. Der XY-Offset zur Spindelachse (~30–50 mm) ist unkritisch, solange er kalibriert ist — er kostet nur Verfahrweg am Arbeitsraumrand.
+  - **Staubschutz:** geschlossene Druckhülle, unten kleines Fenster; Position hinter/neben dem Air-Assist-Strahl.
+- **Kabel:** USB 2.0 reicht (MJPEG). Durchs Gehäuse per flacher Fensterdurchführung oder vorhandener Öffnung nach hinten, dann an den Mac, auf dem makera-pcb ohnehin läuft. Schleppkettenersatz: Kabel mit Spiralschlauch an den vorhandenen Kabelbaum des Kopfs binden. (WLAN-Variante mit Pi Zero 2 W nur, falls die Durchführung nicht akzeptabel ist — mehr Latenz, mehr Teile.)
+
+### Software-Architektur (Integration in makera-pcb)
+
+- **Vision-Sidecar in Python** (FastAPI/Flask + `opencv-python`): greift die UVC-Kamera ab, liefert (a) einen **MJPEG-Stream** `GET /stream` und (b) JSON-Endpunkte `GET /detect/aruco`, `GET /detect/circle`, `GET /detect/edges`. Begründung gegen opencv4nodejs: der Original-Wrapper ist [unmaintained](https://github.com/justadudewhohacks/opencv4nodejs/), der [@u4-Fork](https://www.npmjs.com/package/@u4/opencv4nodejs) lebt, aber native Builds sind fragil — ein Python-Prozess, den `server.js` als Child-Process startet und über `localhost` anspricht, ist robuster und hält den Node-Kern schlank.
+- **Node-Seite:** neuer Router `/api/vision/*`, der den Sidecar proxied; die Web-UI bekommt einen Kamera-Tab mit Livebild + Fadenkreuz-Overlay (einfaches `<img src="/api/vision/stream">` reicht für MJPEG, WebRTC ist unnötig).
+- **Nullpunkt-Setzen:** UI-Button „Vision-Origin" → Node liest aktuelle WPos/MPos aus dem Status-Parser (`machine.js` hat die Felder), addiert den gespeicherten Kamera-Offset und sendet `G10 L20 P0 X<dx> Y<dy>` über die bestehende Command-Pipeline.
+
+### Kalibrier-Workflow Schritt für Schritt
+
+1. **Intrinsik (einmalig):** Schachbrett/ChArUco ausdrucken, ~20 Bilder aus leicht verschiedenen Lagen, `cv2.calibrateCamera` → Entzerrungsparameter speichern. (Bei der verzeichnungsarmen ELP-Optik fast Kosmetik, aber gratis Genauigkeit.)
+2. **mm/px-Maßstab (kTAMV-Methode):** Kopf über ein beliebiges kontrastreiches Feature stellen, per `G91`-Jogs ±2 mm in X/Y verfahren, Feature-Verschiebung in Pixeln tracken → Affinmatrix Pixel↔mm (enthält auch Rotation der Kamera zum Achsensystem). Automatisierbar als ein Button.
+3. **Kamera↔Spindel-Offset (der entscheidende Schritt):** mit dem V-Bit einen Punkt in ein Reststück **ankratzen** (oder 0,8-mm-Loch bohren), dort `G10 L20 P0 X0 Y0` setzen, dann joggen bis die Marke exakt im Fadenkreuz liegt (bzw. Auto-Zentrierung per Kreiserkennung). Die dann angezeigte WPos **ist** der Offset. Bei zwei verschiedenen Z-Höhen wiederholen und linear interpolieren — das fängt eine nicht perfekt senkrechte Kamera ab.
+4. **Verifikation:** zweite Marke an anderer Stelle fräsen, per Vision anfahren, Abweichung messen. Wird sie > 0,05 mm, Halter versteifen oder Schritt 2/3 wiederholen.
+5. **Re-Kalibrierung** nur nach Demontage des Halters oder Crash nötig (LightBurn-Erfahrung: [jede Kamerabewegung invalidiert die Ausrichtung](https://docs.lightburnsoftware.com/2.1/Reference/Cameras/Alignment/)).
+
+## 4. Realistische Einschätzung
+
+**Genauigkeit:** Bei 60 mm Abstand bildet die 8MP-Kamera ~72 mm Feldbreite auf 3264 px ab → **~0,022 mm/px**; Subpixel-Ecken-/Kreisdetektion (0,1–0,3 px) bringt die reine Vision-Messung auf 0,005–0,01 mm. Begrenzend sind dann Mechanik und Kalibrierung: Halter-Flex, Wiederholgenauigkeit der Achsen, Restfehler der Offset-Bestimmung. **Realistisch als Gesamtsystem: 0,05 mm mit der 8MP-Kamera, ~0,1 mm mit einer 20-€-Kamera** — Literaturwerte stützen das: [Sub-mm ist mit Low-Cost-Kameras bei kurzem Abstand dokumentiert](https://arxiv.org/html/2509.17345v3), mit Industriekamera + 4-mm-FOV sogar [< 1 µm](https://www.mdpi.com/1424-8220/20/18/5302). Die oft zitierten „±5–10 mm für ArUco" gelten [für 1 m Abstand](https://zbotic.in/aruco-marker-detection-pose-estimation-with-opencv-python/) und sind hier irrelevant. Für doppelseitige PCBs (Via-Registrierung ~0,1 mm nötig) reicht das System damit klar; das manuelle Anker-Anlegen dürfte heute schlechter sein.
+
+**Reicht ein ToF/Laser allein statt Kamera? Nein.** ToF (±5–7 mm) verfehlt die nötige Genauigkeit um zwei Größenordnungen; ein präziser Triangulationslaser (10 µm) kostet 200 €+, misst aber nur Z — und Z liefert der Wired Probe schon besser (echter mechanischer Kontakt, Höhenkarte). Umgekehrt ersetzt **Kamera + Maschinen-Z** die Distanzmessung vollständig: Platine = Ebene mit bekannter Höhe → fester Bildmaßstab → metrische XY-Messung aus einem Einzelbild. Der einzige Fall für einen Laser wäre berührungsloses Height-Mapping als Probe-Ersatz — kein aktuelles Problem von euch.
+
+**Phasenplan (Aufwand grob):**
+
+- **Phase 1 — Beobachten + manueller Vision-Nullpunkt** (1–2 Tage Dev): Kamera + Halter + MJPEG-Stream im UI, Fadenkreuz, manuelles Anfahren, Offset per Schritt-3-Workflow, Button setzt `G10 L20`. Bringt sofort: präzises Nullen ohne Anker-Zwang + Live-Blick in die geschlossene Maschine.
+- **Phase 2 — Auto-Erkennung** (1–2 Wochenenden): Python-Sidecar mit Kreis-/Kantendetektion; LPKF-Workflow für doppelseitig (Passlöcher bohren → nach dem Wenden automatisch finden → Translation+Rotation setzen); Rohling-Kantenerkennung als Stock-Fit-Zubringer.
+- **Phase 3 — Auto-Kalibrierung** (weiteres Wochenende): ChArUco-Marker auf der Opferplatte, automatische Neuvermessung von Maßstab + Offset per Knopfdruck, Drift-Überwachung; optional Fräsbild-Inspektion.
+
+Der Nutzen konzentriert sich klar auf Phase 1+2 — sie ersetzen die fehleranfälligsten Handgriffe (Nullen, Wenden). Phase 3 ist Komfort. Das Projekt ist mit ~100 € Hardware und überschaubarem Code sehr gut machbar, weil eure App die Maschinensteuerung (Status, Jog, `G10 L20`, Command-Pipeline) bereits vollständig besitzt — es fehlt nur Auge + Mathematik.

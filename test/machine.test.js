@@ -2,17 +2,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import crypto from 'node:crypto';
-import { parseStatus, crc16xmodem, encodeFrame, CarveraConnection } from '../src/machine.js';
+import { parseStatus, crc16xmodem, encodeFrame, CarveraConnection, escapeShellPath, unescapeShellPath } from '../src/machine.js';
 
 const FRAME_HEADER = 0x8668;
 const FRAME_END = 0x55aa;
 const PTYPE_CTRL_SINGLE = 0xa1;
+const PTYPE_CTRL_MULTI = 0xa2;
+const PTYPE_NORMAL_INFO = 0x90;
 const PTYPE_FILE_START = 0xb0;
 const PTYPE_FILE_MD5 = 0xb1;
 const PTYPE_FILE_VIEW = 0xb2;
 const PTYPE_FILE_DATA = 0xb3;
 const PTYPE_FILE_END = 0xb4;
+const PTYPE_FILE_CAN = 0xb5;
 const PTYPE_STATUS_RES = 0x81;
+const u16be = (n) => Buffer.from([(n >> 8) & 0xff, n & 0xff]);
 
 test('crc16xmodem matches the standard check value', () => {
   assert.equal(crc16xmodem(Buffer.from('123456789')), 0x31c3);
@@ -142,28 +146,62 @@ function makeFrameParser(onFrame) {
 // Framed mock machine mirroring current firmware (>= 1.0.5). It answers a
 // framed "?" with a framed status frame and receives uploads via the framed
 // file protocol, driving the transfer by requesting VIEW then each DATA block.
-function startMockMachine() {
+function startMockMachine(opts = {}) {
   return new Promise((resolve) => {
     const server = net.createServer((socket) => {
       const send = (ptype, data) => socket.write(encodeFrame(ptype, data || Buffer.alloc(0)));
       let up = null; // { path, md5, packetSize, total, chunks }
+      let dl = null; // { data, packetSize, total } — active framed download
       const parse = makeFrameParser((ptype, data) => {
         if (ptype === PTYPE_CTRL_SINGLE && data[0] === 0x3f) {
           send(PTYPE_STATUS_RES, Buffer.from('<Idle,MPos:0.000,0.000,0.000,WPos:1.000,2.000,3.000,F:0,0,100,S:0,0,100,T:1,0>'));
           return;
         }
+        if (ptype === PTYPE_CTRL_MULTI) {
+          // Console commands (ls/cat/echo/...). Output is streamed as normal-info
+          // frames; runShell terminates on the echoed sentinel it appends.
+          const line = data.toString('latin1').replace(/\n$/, '');
+          const sp = line.indexOf(' ');
+          const cmd = sp < 0 ? line : line.slice(0, sp);
+          const rest = sp < 0 ? '' : line.slice(sp + 1);
+          if (cmd === 'echo') {
+            send(PTYPE_NORMAL_INFO, Buffer.from('echo: ' + rest + '\r\n', 'latin1'));
+          } else if (cmd === 'ls') {
+            const p = rest.replace(/^-\S+\s*/, ''); // drop the -s flag
+            const listing = opts.lsByPath?.[unescapeShellPath(p)] ?? opts.lsOutput ?? '';
+            if (listing) send(PTYPE_NORMAL_INFO, Buffer.from(listing, 'latin1'));
+          } else if (cmd === 'cat') {
+            const path = unescapeShellPath(rest);
+            const content = opts.files?.[path];
+            send(PTYPE_NORMAL_INFO, Buffer.from(content != null ? content : 'File not found: ' + path + '\r\n', 'latin1'));
+          }
+          return;
+        }
         if (ptype === PTYPE_FILE_START) {
           const line = data.toString('latin1').trim();
-          if (line.startsWith('upload ')) up = { path: line.slice(7).trim(), chunks: [] };
+          if (line.startsWith('upload ')) { up = { path: line.slice(7).trim(), chunks: [] }; dl = null; }
+          else if (line.startsWith('download ')) {
+            up = null;
+            const p = unescapeShellPath(line.slice(9).trim());
+            const content = opts.files?.[p];
+            if (content == null) { send(PTYPE_FILE_CAN); dl = null; } // firmware cancels on a missing file
+            else dl = { data: Buffer.from(content, 'latin1'), packetSize: 8192 };
+          }
           return;
         }
         if (ptype === PTYPE_FILE_MD5) {
+          if (dl) { send(PTYPE_FILE_MD5, Buffer.from(crypto.createHash('md5').update(dl.data).digest('hex'))); return; }
           if (!up) return;
           up.md5 = data.toString('latin1');
           send(PTYPE_FILE_VIEW); // request file metadata
           return;
         }
         if (ptype === PTYPE_FILE_VIEW) {
+          if (dl) {
+            dl.total = Math.max(1, Math.ceil(dl.data.length / dl.packetSize));
+            send(PTYPE_FILE_VIEW, Buffer.concat([u32be(dl.total), u16be(dl.packetSize)]));
+            return;
+          }
           if (!up) return;
           up.total = data.readUInt32BE(0);
           up.packetSize = data.readUInt16BE(4);
@@ -171,6 +209,13 @@ function startMockMachine() {
           return;
         }
         if (ptype === PTYPE_FILE_DATA) {
+          if (dl) {
+            const seq = data.readUInt32BE(0);
+            const start = (seq - 1) * dl.packetSize;
+            const chunk = dl.data.subarray(start, Math.min(dl.data.length, start + dl.packetSize));
+            send(PTYPE_FILE_DATA, Buffer.concat([u32be(seq), chunk]));
+            return;
+          }
           if (!up) return;
           const seq = data.readUInt32BE(0);
           up.chunks[seq - 1] = data.subarray(4);
@@ -183,6 +228,7 @@ function startMockMachine() {
           }
           return;
         }
+        if (ptype === PTYPE_FILE_END) { if (dl) dl = null; return; }
       });
       socket.on('data', parse);
       socket.on('error', () => {});
@@ -238,5 +284,61 @@ test('handles an abrupt socket reset without throwing', async () => {
   const closed = new Promise((resolve) => conn.once('close', resolve));
   await closed; // must resolve (no unhandled 'error' crash)
   assert.equal(conn.connected, false);
+  server.close();
+});
+
+// ---------------------------------------------------------------------------
+// SD file browser: path escaping + the console-driven list()/download().
+// ---------------------------------------------------------------------------
+
+test('escapeShellPath/unescapeShellPath round-trip the firmware control bytes', () => {
+  const p = '/sd/gcodes/My Board (v2)!.nc';
+  const esc = escapeShellPath(p);
+  assert.ok(!esc.includes(' '), 'spaces are encoded');
+  assert.ok(esc.includes('\x01'), 'space -> 0x01');
+  assert.equal(unescapeShellPath(esc), p);
+});
+
+test('list() parses ls -s output (dirs, sizes, unescaped spaces, sorted)', async () => {
+  const lsOutput =
+    'PCB-UV-MASK(PART2).nc 475010 20250108173100\r\n' +
+    'Examples/ 0 20250108173100\r\n' +
+    'my\x01board.nc 128 20250108173100\r\n';
+  const { server, port } = await startMockMachine({ lsByPath: { '/sd/gcodes': lsOutput } });
+  const conn = new CarveraConnection('127.0.0.1', port);
+  await conn.connect();
+  await new Promise((r) => conn.once('status', r));
+  const entries = await conn.list('/sd/gcodes');
+  assert.equal(entries[0].name, 'Examples'); // dirs sort first
+  assert.equal(entries[0].isDir, true);
+  const byName = Object.fromEntries(entries.map((e) => [e.name, e]));
+  assert.equal(byName['PCB-UV-MASK(PART2).nc'].size, 475010);
+  assert.equal(byName['PCB-UV-MASK(PART2).nc'].isDir, false);
+  assert.equal(byName['my board.nc'].size, 128); // 0x01 decoded back to a space
+  conn.disconnect();
+  server.close();
+});
+
+test('download() reassembles multi-block file bytes verbatim via the framed protocol', async () => {
+  const path = '/sd/gcodes/Examples/LED/PCB-UV-MASK(PART2).nc';
+  // > 8192 bytes to exercise multi-block transfer (VIEW total > 1, DATA by seq)
+  const content = '%\n(UV SOLDER MASK)\nG21\nG90\n' + 'X1.5 Y2.5\n'.repeat(3000) + 'M30\n';
+  const { server, port } = await startMockMachine({ files: { [path]: content } });
+  const conn = new CarveraConnection('127.0.0.1', port);
+  await conn.connect();
+  await new Promise((r) => conn.once('status', r));
+  const buf = await conn.download(path);
+  assert.equal(buf.toString('utf8'), content);
+  conn.disconnect();
+  server.close();
+});
+
+test('download() rejects a missing file (machine cancels the transfer)', async () => {
+  const { server, port } = await startMockMachine({ files: {} });
+  const conn = new CarveraConnection('127.0.0.1', port);
+  await conn.connect();
+  await new Promise((r) => conn.once('status', r));
+  await assert.rejects(() => conn.download('/sd/gcodes/nope.nc'), /cancel/i);
+  conn.disconnect();
   server.close();
 });

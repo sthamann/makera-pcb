@@ -17,6 +17,7 @@
         </div>
       </div>
       <div class="topbar-actions">
+        <span id="hdrStart" class="hdr-start" data-i18n-title="hdr.startTitle" title="Startpunkt (Werkstück-Koordinaten) des Jobs">—</span>
         <button id="machHeaderState" class="pill off hdr-pill" data-i18n="machine.hdrDisconnected" data-i18n-title="machine.hdrHint" title="Maschinen-Verbindung (Tab Maschine)">Maschine getrennt</button>
         <button id="generate" class="btn primary" disabled data-i18n="btn.generate">G-Code erzeugen</button>
         <button id="loadExample" class="btn ghost" data-i18n="btn.loadExample">Beispiel-Board laden</button>
@@ -335,6 +336,7 @@
             <div class="stat"><span class="stat-l"><span data-i18n="stat.wpos">WPos (Werkstück)</span> <span class="help" tabindex="0" data-i18n-tip="help.wpos">?</span></span><b data-s="wpos">—</b></div>
             <div class="stat"><span class="stat-l"><span data-i18n="stat.mpos">MPos (Maschine)</span> <span class="help" tabindex="0" data-i18n-tip="help.mpos">?</span></span><b data-s="mpos">—</b></div>
             <div class="stat"><span class="stat-l"><span data-i18n="stat.origin">Werkstück-Nullpunkt</span> <span class="help" tabindex="0" data-i18n-tip="help.origin">?</span></span><b data-s="origin">—</b></div>
+            <div class="stat"><span class="stat-l"><span data-i18n="stat.wco">Nullpunkt @ Maschine</span> <span class="help" tabindex="0" data-i18n-tip="help.wco">?</span></span><b data-s="wco">—</b></div>
             <div class="stat"><span class="stat-l"><span data-i18n="stat.feed">Vorschub</span> <span class="help" tabindex="0" data-i18n-tip="help.feed">?</span></span><b data-s="feed">—</b></div>
             <div class="stat"><span class="stat-l"><span data-i18n="stat.spin">Spindel</span> <span class="help" tabindex="0" data-i18n-tip="help.spin">?</span></span><b data-s="spin">—</b></div>
             <div class="stat"><span class="stat-l"><span data-i18n="stat.tool">Werkzeug</span> <span class="help" tabindex="0" data-i18n-tip="help.tool">?</span></span><b data-s="tool">—</b></div>
@@ -375,6 +377,7 @@
               <div class="act"><button class="btn small ghost" data-action="setOriginAnchor1" data-i18n="dc.setOriginAnchor1">Nullpunkt = Anker 1</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginAnchor1">?</span></div>
               <div class="act"><button class="btn small ghost" data-action="setOriginXYZ" data-i18n="dc.setOriginXYZ">Nullpunkt setzen (XYZ)</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginXYZ">?</span></div>
               <div class="act"><button class="btn small ghost" data-action="setOriginXY" data-i18n="dc.setOriginXY">Nullpunkt XY</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginXY">?</span></div>
+              <div class="act"><button class="btn small ghost" data-action="setOriginZ" data-i18n="dc.setOriginZ">Nur Z = 0 setzen</button><span class="help" tabindex="0" data-i18n-tip="help.setOriginZ">?</span></div>
               <div class="act"><button class="btn small ghost" data-action="probe" data-i18n="dc.probe">Z antasten</button><span class="help" tabindex="0" data-i18n-tip="help.probe">?</span></div>
               <div class="act"><button class="btn small ghost" data-action="level" data-i18n="dc.level">Auto-Leveling</button><span class="help" tabindex="0" data-i18n-tip="help.level">?</span></div>
               <div class="act"><button class="btn small ghost" data-action="margin" data-i18n="dc.margin">Rand abfahren</button><span class="help" tabindex="0" data-i18n-tip="help.margin">?</span></div>
@@ -455,6 +458,33 @@
             <button class="btn small danger" data-action="stop" data-i18n="run.stop">■ Stop</button>
             <span class="help" tabindex="0" data-i18n-tip="help.runControls">?</span>
           </div>
+          <details id="fbSection" class="file-browser">
+            <summary><span data-i18n="fb.title">SD-Dateien (Datei-Browser)</span> <span class="help" tabindex="0" data-i18n-tip="help.fb">?</span></summary>
+            <div class="fb-toolbar">
+              <button id="fbRefresh" class="btn small ghost" data-i18n="fb.refresh">Aktualisieren</button>
+              <button id="fbUp" class="btn small ghost" data-i18n="fb.up">▲ Übergeordnet</button>
+              <button id="fbMkdir" class="btn small ghost" data-i18n="fb.mkdir">Neuer Ordner</button>
+              <button id="fbUpload" class="btn small ghost" data-i18n="fb.upload">Datei hochladen…</button>
+              <input id="fbFileInput" type="file" hidden />
+            </div>
+            <div id="fbCrumbs" class="fb-crumbs"></div>
+            <div id="fbList" class="fb-list"><p class="muted" data-i18n="fb.needConn">Mit der Maschine verbinden, um SD-Dateien zu durchsuchen.</p></div>
+          </details>
+
+          <div id="fbViewer" class="fb-viewer hidden">
+            <div class="fb-viewer-box">
+              <div class="fb-viewer-head">
+                <b id="fbViewerName" class="fb-viewer-name">—</b>
+                <span class="fb-viewer-actions">
+                  <button id="fbViewerDl" class="btn small ghost" data-i18n="fb.download">Herunterladen</button>
+                  <button id="fbViewerCopy" class="btn small ghost" data-i18n="dock.copy">Kopieren</button>
+                  <button id="fbViewerClose" class="btn small" data-i18n="fb.close">Schließen</button>
+                </span>
+              </div>
+              <pre id="fbViewerBody" class="console fb-viewer-body"></pre>
+            </div>
+          </div>
+
           <div class="mconsole-head"><span data-i18n="dock.log">Maschinen-Log</span><span class="mconsole-actions"><button id="mConsoleAiBtn" class="btn small ghost" data-i18n="ai.diagnose" data-i18n-title="ai.diagnoseTitle" title="Das Log von der KI analysieren lassen">🤖 KI fragen</button><button id="mConsoleCopy" class="btn small ghost" data-i18n="dock.copy">Kopieren</button></span></div>
           <pre id="mConsole" class="console mach-console"></pre>
           <div id="mConsoleAi" class="ai-result mconsole-ai hidden"></div>
@@ -493,11 +523,14 @@
             </div>
           </div>
           <div id="fabWizard" class="fab-wizard hidden"></div>
-          <h3 class="sub" data-i18n="fab.sub">Arbeitsschritte – Schritt für Schritt</h3>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+            <h3 class="sub" data-i18n="fab.sub" style="margin:0">Arbeitsschritte – Schritt für Schritt</h3>
+            <button id="fabRestart" class="btn small ghost" data-i18n="fab.restart" data-i18n-title="fab.restartTitle" title="Alle Häkchen zurücksetzen und wieder bei Schritt 1 beginnen" type="button">↻ Prozess neu starten</button>
+          </div>
           <div id="fabSteps" class="fab-steps"><p class="muted" data-i18n="fab.stepsPlaceholder">Board laden – dann erscheinen hier alle Schritte mit Zeit, Werkzeugwechsel-Ansage und den Lack-/Trocken-Schritten.</p></div>
           <details class="trouble" id="fabLogPanel">
-            <summary><span data-i18n="log.title">Prozess-Log</span> <button id="logClear" class="btn small ghost" data-i18n="log.clear" type="button">Leeren</button></summary>
-            <pre id="fabLog" class="console"></pre>
+            <summary><span data-i18n="log.title">Prozess-Log</span> <button id="fabLogCopy" class="btn small ghost" data-i18n="log.copy" type="button">Kopieren</button> <button id="logClear" class="btn small ghost" data-i18n="log.clear" type="button">Leeren</button></summary>
+            <pre id="fabLog" class="console sys-log"></pre>
           </details>
         </div>
       </section>
@@ -525,6 +558,7 @@
         <span class="dock-stat"><label data-i18n="stat.state">Status</label><b data-s="state">—</b></span>
         <span class="dock-stat"><label data-i18n="stat.wpos">WPos</label><b data-s="wpos">—</b></span>
         <span class="dock-stat"><label data-i18n="stat.origin">Nullpunkt</label><b data-s="origin">—</b></span>
+        <span class="dock-stat" title="Maschinenposition des Werkstück-Nullpunkts (WCO)"><label data-i18n="stat.wco">Nullpunkt @ Masch.</label><b data-s="wco">—</b></span>
         <span class="dock-stat"><label data-i18n="stat.tool">Werkzeug</label><b data-s="tool">—</b></span>
         <span class="dock-stat"><label data-i18n="stat.spin">Spindel</label><b data-s="spin">—</b></span>
         <span class="dock-flex"></span>
@@ -555,8 +589,19 @@
           </div>
         </div>
         <div class="dock-log-wrap">
-          <div class="dock-log-head"><span data-i18n="dock.log">Maschinen-Log</span><span class="mconsole-actions"><button id="dockAiBtn" class="btn small ghost" data-i18n="ai.diagnose">🤖 KI fragen</button><button id="dockCopyLog" class="btn small ghost" data-i18n="dock.copy">Kopieren</button></span></div>
+          <div class="dock-log-head">
+            <span class="log-tabs">
+              <button class="log-tab active" data-logtab="machine" data-i18n="dock.log" type="button">Maschinen-Log</button>
+              <button class="log-tab" data-logtab="system" data-i18n="log.sysTitle" type="button">System-Log</button>
+            </span>
+            <span class="mconsole-actions">
+              <button id="dockAiBtn" class="btn small ghost" data-i18n="ai.diagnose">🤖 KI fragen</button>
+              <button id="dockCopyLog" class="btn small ghost" data-i18n="log.copy">Kopieren</button>
+              <button id="dockExportLog" class="btn small ghost" data-i18n="log.export">Export</button>
+            </span>
+          </div>
           <pre id="dockConsole" class="console mach-console"></pre>
+          <pre id="dockSysLog" class="console sys-log hidden"></pre>
         </div>
       </div>
     </div>

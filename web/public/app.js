@@ -166,27 +166,167 @@ const state = {
   aiLastHash: null,
   fab: { steps: [], done: {}, active: null, dry: {}, view: null, anim: { raf: null, playing: false }, job: null },
   projectLog: [],
+  machineLog: [], // persistent per-project machine console (append-only, capped)
+  _machWindow: [], // last status log window (for the append diff)
+  motion: { trigger: null, wpos: null, state: null }, // motion audit (settle logging)
+  logTab: 'machine', // footer dock: 'machine' | 'system'
 };
 
-// ---------- per-project process log ----------
+// ---------- per-project logs (system + machine) ----------
+const SYS_LOG_MAX = 4000; // keep a long, continuous audit trail per project
+const MACH_LOG_MAX = 4000;
+
+// Set text on a console <pre> WITHOUT stealing the user's scroll position:
+// only auto-scroll to the bottom when already (near) the bottom ("sticky").
+function setConsoleText(el, text) {
+  if (!el) return;
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  el.textContent = text;
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+function fmtLogTime(ts) {
+  return new Date(ts).toLocaleTimeString(getLang() === 'de' ? 'de-DE' : 'en-GB');
+}
+function sysLogText() {
+  return state.projectLog.map((e) => {
+    const mark = e.level === 'error' ? '✗' : e.level === 'warn' ? '⚠' : '·';
+    return `${fmtLogTime(e.ts)} ${mark} ${t(e.key, e.vars)}`;
+  }).join('\n');
+}
+function machineLogText() {
+  return state.machineLog.map((e) => `${fmtLogTime(e.ts)}  ${e.line}`).join('\n');
+}
+
+// The SYSTEM log (everything that happens in the UI): append-only, persisted
+// per project (project.log), rendered into every `.sys-log` pre.
 function logEvent(key, vars, level = 'info') {
-  const entry = { ts: Date.now(), key, vars: vars || {}, level };
-  state.projectLog.push(entry);
-  if (state.projectLog.length > 500) state.projectLog.shift();
-  // persist into the current project (if one is open)
+  state.projectLog.push({ ts: Date.now(), key, vars: vars || {}, level });
+  if (state.projectLog.length > SYS_LOG_MAX) state.projectLog.shift();
   const cur = currentProjectId ? currentProjectId() : '';
   if (cur) { const projs = loadProjects(); if (projs[cur]) { projs[cur].log = state.projectLog; saveProjects(projs); } }
   renderLog();
 }
 function renderLog() {
-  const el = $('#fabLog');
-  if (!el) return;
-  el.textContent = state.projectLog.map((e) => {
-    const time = new Date(e.ts).toLocaleTimeString(getLang() === 'de' ? 'de-DE' : 'en-GB');
-    const mark = e.level === 'error' ? '✗' : e.level === 'warn' ? '⚠' : '·';
-    return `${time} ${mark} ${t(e.key, e.vars)}`;
-  }).join('\n');
-  el.scrollTop = el.scrollHeight;
+  const text = sysLogText();
+  $$('.sys-log').forEach((el) => setConsoleText(el, text));
+}
+
+// The MACHINE log: the raw console stream, made CONTINUOUS per project. The
+// status endpoint only returns the last ~40 lines, so we append the genuinely
+// new lines (overlap diff against what we already stored) and persist them in
+// a per-project localStorage key — it is never recreated from scratch.
+function machineLogKey() { return `makera_machlog_${currentProjectId() || 'none'}`; }
+let machineLogSaveTimer = null;
+function saveMachineLog() {
+  clearTimeout(machineLogSaveTimer);
+  machineLogSaveTimer = setTimeout(() => { try { saveJSON(machineLogKey(), state.machineLog.slice(-MACH_LOG_MAX)); } catch { /* storage full */ } }, 500);
+}
+function loadMachineLog() {
+  state.machineLog = loadJSON(machineLogKey(), []) || [];
+  state._machWindow = [];
+}
+function appendMachineWindow(win) {
+  if (!Array.isArray(win) || !win.length) return;
+  const stored = state.machineLog.map((e) => e.line);
+  const maxK = Math.min(stored.length, win.length);
+  let overlap = 0;
+  for (let k = maxK; k > 0; k--) {
+    let ok = true;
+    for (let i = 0; i < k; i++) { if (stored[stored.length - k + i] !== win[i]) { ok = false; break; } }
+    if (ok) { overlap = k; break; }
+  }
+  if (overlap >= win.length) return; // nothing new
+  const ts = Date.now();
+  for (let i = overlap; i < win.length; i++) state.machineLog.push({ ts, line: win[i] });
+  if (state.machineLog.length > MACH_LOG_MAX) state.machineLog = state.machineLog.slice(-MACH_LOG_MAX);
+  saveMachineLog();
+  renderMachineConsole();
+}
+function renderMachineConsole() {
+  const text = machineLogText();
+  $$('.mach-console').forEach((el) => setConsoleText(el, text));
+}
+// Footer dock: switch between the machine log and the system (UI) log.
+function setLogTab(which) {
+  state.logTab = which === 'system' ? 'system' : 'machine';
+  $$('.log-tab').forEach((b) => b.classList.toggle('active', b.dataset.logtab === state.logTab));
+  $('#dockConsole')?.classList.toggle('hidden', state.logTab !== 'machine');
+  $('#dockSysLog')?.classList.toggle('hidden', state.logTab !== 'system');
+  $('#dockAiBtn')?.classList.toggle('hidden', state.logTab !== 'machine'); // AI diagnoses the machine log
+  if (state.logTab === 'system') renderLog(); else renderMachineConsole();
+  try { saveJSON('makera_logtab', state.logTab); } catch { /* ignore */ }
+}
+
+// Copy / export helpers shared by both logs. `which` = 'system' | 'machine'.
+function logTextFor(which) { return which === 'machine' ? machineLogText() : sysLogText(); }
+async function copyLogText(which) {
+  const txt = (logTextFor(which) || '').trim();
+  if (!txt) return toast(t('log.empty'), true);
+  try { await navigator.clipboard.writeText(txt); toast(t('log.copied')); }
+  catch {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand('copy'); ta.remove();
+      toast(ok ? t('log.copied') : t('dock.copyFail'), !ok);
+    } catch { toast(t('dock.copyFail'), true); }
+  }
+}
+function exportLogText(which) {
+  const txt = logTextFor(which);
+  if (!txt.trim()) return toast(t('log.empty'), true);
+  const projs = loadProjects();
+  const cur = currentProjectId();
+  const base = ((cur && projs[cur]?.name) || 'makera').replace(/[^\w.\-]/g, '_');
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  downloadText(`${base}_${which === 'machine' ? 'machine' : 'system'}-log_${stamp}.txt`, txt);
+}
+async function copyProcessLog() { return copyLogText('system'); }
+// Record what triggered the next machine motion, for the settle audit entry.
+function setMotionTrigger(label) { if (label) state.motion.trigger = String(label); }
+
+const MOTION_STATES = new Set(['Run', 'Jog', 'Home', 'Hold', 'Pause', 'Wait', 'Tool']);
+function fmtPos(a) { return a && a.length ? a.map((v) => v.toFixed(2)).join('/') : '—'; }
+// Log a motion into the system log when the machine SETTLES at a new position
+// (was moving → now Idle): time (added by renderLog) + WPos + MPos + trigger.
+function logMotionSettle(prevState, curState, s) {
+  if (curState !== 'Idle' || !prevState || !MOTION_STATES.has(prevState)) return;
+  const wpos = s?.wpos;
+  const prevW = state.motion.wpos;
+  const changed = !prevW || !wpos || wpos.some((v, i) => Math.abs(v - (prevW[i] ?? 0)) > 0.01);
+  state.motion.wpos = wpos ? wpos.slice() : null;
+  if (!changed) return;
+  logEvent('log.motion', {
+    wpos: fmtPos(wpos),
+    mpos: fmtPos(s?.mpos),
+    trigger: state.motion.trigger || t('log.motionManual'),
+  });
+}
+
+// Settings audit trail: on every config change, diff the data-path values
+// against the last snapshot and log each change (path: old → new) into the
+// process log, so it records ALL setting changes — not just job events.
+let loggedSettings = null;
+function currentSettings() {
+  const o = {};
+  for (const el of $$('[data-path]')) {
+    if (el.dataset.path.startsWith('vacuum.')) continue;
+    o[el.dataset.path] = el.type === 'checkbox' ? String(el.checked) : String(el.value);
+  }
+  return o;
+}
+function resetSettingsBaseline() { loggedSettings = currentSettings(); }
+function logSettingChanges() {
+  const cur = currentSettings();
+  if (loggedSettings) {
+    for (const k of Object.keys(cur)) {
+      if (loggedSettings[k] !== undefined && loggedSettings[k] !== cur[k]) {
+        logEvent('log.settingChanged', { path: k, from: loggedSettings[k], to: cur[k] });
+      }
+    }
+  }
+  loggedSettings = cur;
 }
 
 const PATTERNS = {
@@ -252,8 +392,19 @@ function setDeep(obj, dotted, value) {
 
 // ---------- generate ----------
 let genTimer = null;
+// Central header readout of the job's start point (work coordinates) = the
+// placement offset the milling / scan-margin begins at.
+function renderStartPoint() {
+  const el = $('#hdrStart');
+  if (!el) return;
+  const p = placementOffset();
+  el.textContent = t('hdr.start', { x: p.x, y: p.y });
+}
 function scheduleGenerate() {
   drawMaterialPreview(); // live material preview even before a board is loaded
+  renderStartPoint();
+  logSettingChanges(); // record every setting change in the process log
+  autosaveProject(); // persist config changes (offset, feeds, …) — survive a reload
   if (!state.files.copper) return;
   clearTimeout(genTimer);
   genTimer = setTimeout(generate, 350);
@@ -434,6 +585,22 @@ function validateAssignments() {
     const cur = state.assignment[op.id];
     const tool = cur != null ? state.tools.find((x) => x.number === cur) : null;
     const typeOk = tool && tool.type === op.toolType;
+
+    // Solder-mask removal needs the DEDICATED spring-loaded UV mask remover —
+    // never the isolation V-bit (both are "vbit", so a type check is not
+    // enough). Reuse a matching tool by label, or create it, so the step can
+    // never silently run with the isolation bit.
+    if (op.id === 'maskRemove') {
+      const isMask = (x) => x.type === 'vbit' && OP_TOOL_PREFER.maskRemove(x);
+      if (typeOk && isMask(tool)) continue;
+      let bit = state.tools.find(isMask);
+      if (!bit) {
+        bit = withToolDefaults({ number: nextNum(), type: 'vbit', diameter: 0.3, collet: 2, label: 'UV Solder Mask Removal Tool 0.3mm (spring)', feedXY: 400, plungeFeed: 200, rpm: 6000 });
+        state.tools.push(bit); toolsChanged = true;
+      }
+      if (state.assignment[op.id] !== bit.number) { state.assignment[op.id] = bit.number; changed = true; }
+      continue;
+    }
 
     if (op.toolType === 'drill') {
       // A hole needs an EXACT-diameter drill. Reuse one if present, otherwise
@@ -851,6 +1018,14 @@ function drawPreview() {
     ctx.strokeStyle = 'rgba(240,180,41,0.7)'; ctx.lineWidth = 1;
     for (const ring of p.clearing) { ctx.beginPath(); ring.forEach(([x, y], i) => (i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y)))); ctx.closePath(); ctx.stroke(); }
   }
+  if (p.maskRemoval && p.maskRemoval.length) {
+    ctx.strokeStyle = 'rgba(56,189,248,0.85)'; ctx.lineWidth = 1;
+    for (const ring of p.maskRemoval) { ctx.beginPath(); ring.forEach(([x, y], i) => (i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y)))); ctx.closePath(); ctx.stroke(); }
+  }
+  if (p.maskPlunges && p.maskPlunges.length) {
+    ctx.fillStyle = 'rgba(56,189,248,0.85)';
+    for (const d of p.maskPlunges) { ctx.beginPath(); ctx.arc(X(d.x), Y(d.y), Math.max(1.2, (d.d / 2) * v.scale), 0, 7); ctx.fill(); }
+  }
   ctx.strokeStyle = '#8b98a9'; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(0) + 16, Y(0)); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(0), Y(0) - 16); ctx.stroke();
@@ -1050,7 +1225,14 @@ function buildFabSteps() {
     steps.push({ id: 'clean', kind: 'manual', title: t('step.clean.t'), instr: t('step.clean.i') });
     steps.push({ id: 'applyMask', kind: 'manual', title: t('step.applyMask.t'), instr: t('step.applyMask.i') });
     steps.push({ id: 'cureMask', kind: 'dry', title: t('step.cureMask.t'), instr: t('step.cureMask.i'), dryMin: 10 });
-    steps.push({ id: 'removeMask', kind: 'manual', title: t('step.removeMask.t'), tool: toolLabelFor('maskRemove') || t('step.removeMask.tool'), instr: t('step.removeMask.i') });
+    // Automatic when a toolpath was derived (pads from copper + drills); falls
+    // back to a manual step when nothing could be derived.
+    const maskFile = Object.keys(files).find((f) => f.includes('soldermask'));
+    const maskNum = state.assignment.maskRemove;
+    const maskToolLabel = (maskNum != null ? `T${maskNum} · ` : '') + t('tool.maskRemover');
+    steps.push(maskFile
+      ? { id: 'removeMask', kind: 'mill', title: t('step.removeMask.t'), tool: maskToolLabel, file: maskFile, est: times.maskRemove, instr: t('step.removeMask.i') }
+      : { id: 'removeMask', kind: 'manual', title: t('step.removeMask.t'), tool: maskToolLabel, instr: t('step.removeMask.i') });
   }
   for (const g of r.stats.drillGroups) {
     const id = `drill:${g.diameter.toFixed(2)}`;
@@ -1304,6 +1486,11 @@ function stepDiagram(step) {
       for (let i = 0; i < 6; i++)
         feat += `<path d="M${b.x + 8} ${b.y + 8 + i * (b.h - 16) / 5} h ${b.w - 16}" stroke="#f0b429" stroke-width="2" opacity="0.7" fill="none"/>`;
       feat += `<text x="${b.x}" y="${b.y - 8}" class="lbl yel">${t('dg.clearing')}</text>`;
+    } else if (id === 'removeMask') {
+      // cured mask (green) with the pads freed (sky-blue) — matches the preview
+      feat = `<rect x="${b.x + 5}" y="${b.y + 5}" width="${b.w - 10}" height="${b.h - 10}" fill="#1f7a4d" opacity="0.5"/>`
+        + [0, 1, 2, 3].map((i) => `<circle cx="${b.x + 18 + i * (b.w - 36) / 3}" cy="${b.y + b.h / 2}" r="4" fill="#38bdf8" stroke="#7fd0f8"/>`).join('')
+        + `<text x="${b.x}" y="${b.y - 8}" class="lbl" style="fill:#38bdf8">${t('dg.removeMask')}</text>`;
     } else {
       for (let i = 0; i < 4; i++)
         feat += `<path d="M${b.x + 12} ${b.y + 12 + i * (b.h - 24) / 3} h ${b.w - 24}" stroke="#0d1017" stroke-width="3" fill="none"/>`;
@@ -1408,6 +1595,7 @@ function jobActive() {
 }
 function startJobMonitor(stepId, name, mode) {
   if (!state.machine.connected) return; // nothing to monitor without a link
+  setMotionTrigger(`${t('log.jobTrigger')}: ${name}`);
   const vacuumKind = vacuumJobKind(name, mode);
   state.fab.job = { monitor: new JobMonitor({ mode }), stepId, name, vacuumKind };
   const events = state.fab.job.monitor.start(name);
@@ -1461,7 +1649,7 @@ function updateJobMonitorFromPoll(d, s) {
   for (const ev of events) {
     if (ev.type !== 'state') continue;
     if (ev.state === JOB_STATE.DONE) {
-      if (job.stepId) state.fab.done[job.stepId] = true;
+      if (job.stepId) { state.fab.done[job.stepId] = true; autosaveProject(); }
       const title = job.stepId ? stepTitleById(job.stepId, job.name) : (job.name || '');
       toast(t('job.stepDone', { title }));
       logEvent('log.stepDone', { title });
@@ -1531,7 +1719,7 @@ function renderFab() {
     if (!stepGateOk(Number(b.dataset.fabidx))) return;
     machineAction(b.dataset.fabaction);
   }));
-  $$('[data-fabdone]', host).forEach((b) => b.addEventListener('click', () => { const id = b.dataset.fabdone; state.fab.done[id] = !state.fab.done[id]; renderFab(); drawFab(); }));
+  $$('[data-fabdone]', host).forEach((b) => b.addEventListener('click', () => { const id = b.dataset.fabdone; state.fab.done[id] = !state.fab.done[id]; renderFab(); drawFab(); autosaveProject(); }));
   $$('[data-drystart]', host).forEach((b) => b.addEventListener('click', () => startDryTimer(b.dataset.drystart)));
 
   const est = state.result.times?.total;
@@ -1575,7 +1763,7 @@ function renderWizard(activeIdx) {
       return machineAction(s.action);
     }
   });
-  $('#fwNext', el)?.addEventListener('click', () => { state.fab.done[s.id] = true; state.fab.view = null; renderFab(); drawFab(); });
+  $('#fwNext', el)?.addEventListener('click', () => { state.fab.done[s.id] = true; state.fab.view = null; renderFab(); drawFab(); autosaveProject(); });
 }
 // ---------- job-start safety gate (Z / leveling plausibility) ----------
 // Cheap, high-signal checks BEFORE a cutting job starts. They exist because a
@@ -1631,7 +1819,11 @@ async function fabRun(step) {
   // relative to the machine's reference corner (top right).
   if (originIsSet(state.machine.status) === false && !confirm(t('confirm.noOrigin'))) return;
   if (!jobSafetyGateOk()) return;
-  if (!confirm(t('fab.runConfirm', { file }))) return;
+  // Mask removal needs the spring tool loaded + a MANUAL Z0 first (no auto
+  // measurement) — walk the user through it instead of running straight into
+  // "No tool or probe tool!" / a too-shallow cut.
+  const runConfirm = step.id === 'removeMask' ? t('fab.maskConfirm') : t('fab.runConfirm', { file });
+  if (!confirm(runConfirm)) return;
   startJobMonitor(step.id, file, 'play'); // disables all start buttons at once
   try {
     const d = await api('/api/machine/run', { name: file, gcode, start: true });
@@ -1654,7 +1846,7 @@ function startDryTimer(id) {
     const el = $(`[data-drytimer="${id}"]`);
     const left = Math.max(0, end - Date.now());
     if (el) el.textContent = ' ' + fmtDur(left / 1000);
-    if (left <= 0) { clearInterval(state.fab.dry[id]); delete state.fab.dry[id]; toast(t('fab.curingDone')); state.fab.done[id] = true; renderFab(); }
+    if (left <= 0) { clearInterval(state.fab.dry[id]); delete state.fab.dry[id]; toast(t('fab.curingDone')); state.fab.done[id] = true; renderFab(); autosaveProject(); }
   };
   state.fab.dry[id] = setInterval(tick, 1000);
   tick();
@@ -1693,6 +1885,7 @@ function drawFab(marker) {
   const strokeSet = (rings, color, closed, dim) => { ctx.strokeStyle = color; ctx.globalAlpha = dim ? 0.3 : 1; ctx.lineWidth = dim ? 0.8 : 1.4; for (const r of rings) { if (!r || r.length < 2) continue; ctx.beginPath(); r.forEach((pt, i) => { const x = pt.x ?? pt[0]; const y = pt.y ?? pt[1]; i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y)); }); if (closed) ctx.closePath(); ctx.stroke(); } ctx.globalAlpha = 1; };
   strokeSet(p.isolation.flat(), '#ff5a5a', true, !active || active.id !== 'isolation');
   if (p.clearing?.length) strokeSet(p.clearing, '#f0b429', true, !active || active.id !== 'clearing');
+  if (p.maskRemoval?.length) strokeSet(p.maskRemoval, '#38bdf8', true, !active || active.id !== 'removeMask');
   strokeSet((p.outline || []).map((l) => l.pts), '#2ecc71', true, !active || active.id !== 'outline');
   if (p.laser?.length) strokeSet(p.laser, '#ff59d8', false, !active || active.id !== 'laser');
   for (const d of p.drills) { ctx.beginPath(); ctx.arc(X(d.x), Y(d.y), Math.max(1.2, (d.d / 2) * v.scale), 0, 7); ctx.fillStyle = active && active.id.startsWith('drill') ? 'rgba(76,141,255,0.9)' : 'rgba(76,141,255,0.4)'; ctx.fill(); }
@@ -1710,11 +1903,15 @@ function fabGeom(step) {
   if (step.id === 'clearing') return { polys: (p.clearing || []).map(toXY), dots: [] };
   if (step.id === 'outline') return { polys: (p.outline || []).map((l) => toXY(l.pts)), dots: [] };
   if (step.id === 'laser') return { polys: (p.laser || []).map(toXY), dots: [] };
+  if (step.id === 'removeMask') {
+    const polys = (p.maskRemoval || []).map(toXY);
+    return polys.length ? { polys, dots: [] } : { polys: [], dots: (p.maskPlunges || []) };
+  }
   if (step.id.startsWith('drill')) { const dia = parseFloat(step.id.split(':')[1]); return { polys: [], dots: p.drills.filter((d) => Math.abs(d.d - dia) < 0.06) }; }
   return null;
 }
 function polyLen(pl) { let L = 0; for (let i = 1; i < pl.length; i++) L += Math.hypot(pl[i].x - pl[i - 1].x, pl[i].y - pl[i - 1].y); return L; }
-function fabColor(step) { return step.id === 'outline' ? '#2ecc71' : step.id === 'laser' ? '#ff59d8' : step.id === 'clearing' ? '#f0b429' : step.id.startsWith('drill') ? '#4c8dff' : '#ff5a5a'; }
+function fabColor(step) { return step.id === 'outline' ? '#2ecc71' : step.id === 'laser' ? '#ff59d8' : step.id === 'clearing' ? '#f0b429' : step.id === 'removeMask' ? '#38bdf8' : step.id.startsWith('drill') ? '#4c8dff' : '#ff5a5a'; }
 
 // Draw the board faint and reveal one step's toolpath up to `frac` (0..1), with a
 // tool head marker — used both for the simulation and the live machine progress.
@@ -1732,6 +1929,7 @@ function drawFabReveal(step, frac) {
   const dim = (rings, color, closed) => { ctx.strokeStyle = color; ctx.globalAlpha = 0.25; ctx.lineWidth = 0.8; for (const r of rings) { if (!r || r.length < 2) continue; ctx.beginPath(); r.forEach((pt, i) => { const x = pt.x ?? pt[0]; const y = pt.y ?? pt[1]; i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y)); }); if (closed) ctx.closePath(); ctx.stroke(); } ctx.globalAlpha = 1; };
   dim(p.isolation.flat(), '#ff5a5a', true);
   if (p.clearing?.length) dim(p.clearing, '#f0b429', true);
+  if (p.maskRemoval?.length) dim(p.maskRemoval, '#38bdf8', true);
   dim((p.outline || []).map((l) => l.pts), '#2ecc71', true);
   if (p.laser?.length) dim(p.laser, '#ff59d8', false);
   for (const d of p.drills) { ctx.beginPath(); ctx.arc(X(d.x), Y(d.y), Math.max(1.2, (d.d / 2) * v.scale), 0, 7); ctx.fillStyle = 'rgba(76,141,255,0.28)'; ctx.fill(); }
@@ -1832,6 +2030,7 @@ async function machineConnect() {
     setPill('on', t('machine.connectedToast'));
     toast(t('machine.connectedToast'));
     logEvent('log.connected', { ip });
+    if ($('#fbSection')?.open) fbOpen(FB.path);
   } catch (err) { toast(t('machine.connectFail', { msg: err.message }), true); }
 }
 async function machineRetry() {
@@ -1863,6 +2062,7 @@ async function machineDisconnect() {
   renderSetupAssistant();
   const diag = $('#machDiag'); diag.classList.add('hidden'); delete diag.dataset.shown;
   logEvent('log.disconnected', {});
+  FB.loaded = false; fbNeedConn();
 }
 // Auto-reconnect: after a dropped connection (or a page reload) get back to the
 // last machine on its own, with a capped backoff. Explicit disconnect cancels it.
@@ -1949,6 +2149,21 @@ async function pollStatus() {
     setStat('feed', s.feed ? s.feed[0].toFixed(0) : '—');
     setStat('spin', s.spindle ? s.spindle[0].toFixed(0) : '—');
     setStat('tool', s.tool ? `T${s.tool[0]}` : '—');
+    // Work zero shown centrally: the MACHINE position of work 0/0 (WCO =
+    // MPos − WPos). Always displayed; logged whenever it changes (origin set).
+    const wco = (s.mpos && s.wpos) ? s.mpos.map((m, i) => m - (s.wpos[i] ?? 0)) : null;
+    const wcoStr = (oset && wco) ? wco.slice(0, 3).map((v) => v.toFixed(2)).join(' / ') : (oset === false ? t('machine.originUnset') : '—');
+    setStat('wco', wcoStr);
+    if (oset && wco && !unhomed) {
+      const prev = state.machine._wco;
+      const changed = !prev || wco.slice(0, 3).some((v, i) => Math.abs(v - (prev[i] ?? 0)) > 0.02);
+      if (changed) {
+        state.machine._wco = wco.slice(0, 3);
+        logEvent('log.originAt', { pos: wco.slice(0, 3).map((v) => v.toFixed(2)).join(' / ') });
+      }
+    } else if (!oset) {
+      state.machine._wco = null;
+    }
     // Auto-leveling: the "O:" field only exists while a height map is active
     // (Kernel.cpp:469-474) and carries its max deviation.
     const lev = s.leveling && s.leveling.length ? Math.abs(s.leveling[0]) : null;
@@ -1957,10 +2172,14 @@ async function pollStatus() {
       el.style.color = lev == null ? '' : (lev > LEVELING_MAX_DEV_WARN_MM ? 'var(--warn, #ffb14e)' : 'var(--ok, #2ecc71)');
     });
     state.machine.tool = s.tool ? s.tool[0] : null;
+    const prevState = state.machine.state;
     state.machine.state = state_; // Idle / Run / Alarm / Home … (used to guard motion)
     state.machine.status = s; // full parsed status (used by the origin guard)
-    const logText = (d.log || []).join('\n');
-    $$('.mach-console').forEach((el) => { el.textContent = logText; el.scrollTop = el.scrollHeight; });
+    // Motion audit: when the machine SETTLES (was moving → now Idle) at a new
+    // position, log timestamp + coordinates + the trigger that caused it.
+    logMotionSettle(prevState, state_, s);
+    // Continuous per-project machine log (append the new lines, keep scroll).
+    appendMachineWindow(d.log || []);
     surfaceMachineMessages(d.log || []);
 
     // Live progress from the status "P" (play: lines, percent, seconds) field.
@@ -2076,27 +2295,40 @@ function toggleDock(force) {
   saveJSON('makera_dock', open);
   syncDockPadding();
 }
-async function copyMachineLog() {
-  const el = document.querySelector('.mach-console');
-  const txt = (el && el.textContent || '').trim();
-  if (!txt) return toast(t('dock.empty'), true);
-  try { await navigator.clipboard.writeText(txt); toast(t('dock.copied')); }
-  catch (e) {
-    // clipboard API can be blocked (non-secure context) — fall back to a manual copy
-    try { el.focus(); const r = document.createRange(); r.selectNodeContents(el); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); const ok = document.execCommand('copy'); s.removeAllRanges(); toast(ok ? t('dock.copied') : t('dock.copyFail'), !ok); }
-    catch { toast(t('dock.copyFail'), true); }
-  }
-}
-
 // Plain-language hint for a raw machine alarm/error message (Makera/Smoothie).
 function explainAlarm(text) {
   const s = (text || '').toLowerCase();
+  // Latched stepper-driver fault (stall/overcurrent/collision). A soft reset
+  // can't clear it — only a power cycle can. Check first: it also carries
+  // "reset required", which must NOT be mistaken for a plain alarm lock.
+  if (/motor alarm|z ?motor|driver alarm|motor.*(alarm|fault)/.test(s)) return t('alarm.motor');
   if (/hard ?limit|soft ?limit|limit/.test(s)) return t('alarm.limit');
+  // "No tool or probe tool!" = a cutting job started while the active tool is
+  // the wired probe (T0) or empty — the spring-loaded mask tool must be loaded
+  // AND active first. Check before the generic probe/tool hints.
+  if (/no tool or probe tool|no tool/.test(s)) return t('alarm.noTool');
+  // "unexpected probe trigger" = the probe input is ALREADY active when the
+  // tool-length measurement starts — almost always the wired probe still
+  // plugged in. Must come before the generic probe hint (opposite advice).
+  if (/unexpected probe|probe trigger/.test(s)) return t('alarm.probeTrigger');
   if (/probe fail|probe/.test(s)) return t('alarm.probe');
   if (/reset to continue/.test(s)) return t('alarm.resetToContinue');
   if (/tool|atc|collet/.test(s)) return t('alarm.tool');
   if (/too small|out of|range/.test(s)) return t('alarm.range');
   return t('alarm.generic');
+}
+// The most useful alarm hint: the reported lastAlarm line is often the generic
+// "Alarm lock", while the real cause ("No tool or probe tool!", "unexpected
+// probe trigger", …) sits a few lines earlier. Scan the recent machine log
+// newest-first for the first line with a SPECIFIC explanation.
+function alarmHint(lastAlarmText) {
+  const generic = t('alarm.generic');
+  const lines = state.machineLog.slice(-18).map((e) => e.line).reverse();
+  for (const line of lines) {
+    const h = explainAlarm(line);
+    if (h && h !== generic) return h;
+  }
+  return explainAlarm(lastAlarmText || '');
 }
 // Show a prominent banner when the machine is in Alarm/Halt or reported an error.
 function renderAlarm(state_, lastAlarm) {
@@ -2108,7 +2340,7 @@ function renderAlarm(state_, lastAlarm) {
   const msg = lastAlarm?.text || (inAlarm ? t('alarm.state', { state: state_ }) : '');
   el.classList.remove('hidden');
   el.innerHTML = `<div><b>⚠ ${escapeHtml(inAlarm ? state_ + ' – ' : '')}${escapeHtml(msg)}</b></div>`
-    + `<div class="ma-hint">${escapeHtml(explainAlarm(msg))}</div>`
+    + `<div class="ma-hint">${escapeHtml(alarmHint(msg))}</div>`
     + `<div class="ma-actions"><button class="btn small" id="maReset">${t('alarm.reset')}</button>`
     + `<button class="btn small" id="maUnlock">${t('alarm.unlock')}</button>`
     + `<button class="btn small ghost" id="maHelp">${t('alarm.help')}</button></div>`;
@@ -2449,6 +2681,8 @@ async function setupAction(action) {
 
 async function machineCommand(line) {
   if (!state.machine.connected) return toast(t('machine.notConnected'), true);
+  setMotionTrigger(line);
+  logEvent('log.command', { line });
   try { await api('/api/machine/command', { line }); } catch (err) { toast(err.message, true); }
 }
 // Send a SEQUENCE of commands strictly in order (each request is awaited, so
@@ -2457,7 +2691,7 @@ async function machineCommand(line) {
 async function machineCommands(lines) {
   if (!state.machine.connected) { toast(t('machine.notConnected'), true); return false; }
   try {
-    for (const line of lines) await api('/api/machine/command', { line });
+    for (const line of lines) { logEvent('log.command', { line }); setMotionTrigger(line); await api('/api/machine/command', { line }); }
     return true;
   } catch (err) { toast(err.message, true); return false; }
 }
@@ -2542,6 +2776,7 @@ async function machineJog(axis, sign) {
   const step = Number($('#jogStep').value) || 1;
   const feed = Number($('#jogFeed').value) || 800;
   const dist = (sign < 0 ? '-' : '') + step;
+  setMotionTrigger(`Jog ${axis}${sign < 0 ? '−' : '+'} ${step} mm`);
   try { await api('/api/machine/jog', { axis, dist, feed }); } catch (err) { toast(err.message, true); }
 }
 // Hold-to-jog: a quick tap moves one step; holding a button jogs continuously
@@ -2555,6 +2790,7 @@ let jogStreaming = false;
 const JOG_STEP = { X: 2, Y: 2, Z: 1, A: 4 };
 async function machineJogContinuous(axis, sign) {
   if (!state.machine.connected) return toast(t('machine.notConnected'), true);
+  setMotionTrigger(`Jog ${axis}${sign < 0 ? '−' : '+'} (gehalten)`);
   const feed = Number($('#jogFeed').value) || 800;
   const step = JOG_STEP[axis] || 2;
   jogStreaming = true;
@@ -2657,6 +2893,9 @@ function machineAction(action) {
     case 'stop': if (confirm(t('confirm.stop'))) machineRealtime('reset'); return;
     case 'setOriginXYZ': if (!needReady()) return; if (confirm(t('confirm.setOriginXYZ'))) { machineCommand('G10 L20 P0 X0 Y0 Z0'); toast(t('machine.originSet')); } return;
     case 'setOriginXY': if (!needReady()) return; if (confirm(t('confirm.setOriginXY'))) { machineCommand('G10 L20 P0 X0 Y0'); toast(t('machine.originSet')); } return;
+    // Z-only origin: for the spring-loaded mask remover you set Z0 by hand
+    // (paper method) WITHOUT touching the X/Y anchor origin.
+    case 'setOriginZ': if (!needReady()) return; if (confirm(t('confirm.setOriginZ'))) { machineCommand('G10 L20 P0 Z0'); toast(t('machine.originSet')); } return;
     // One-click anchor-1 origin: goto anchor 1 (M496.3), WAIT until the
     // deferred firmware move finished, then set the origin via G10 L20 at the
     // Makera offset — no relative move, no soft-endstop risk (see the flow).
@@ -2800,6 +3039,172 @@ async function machineUpload(start) {
     toast(t('machine.uploadErr', { msg: err.message }), true);
     logEvent('log.genError', { msg: err.message }, 'error');
   }
+}
+
+// ---------- SD file browser ----------
+// Browse the machine's SD card, view/download text files (G-code, Gerber,
+// drill, config), upload files into the current directory, and rename/delete/
+// create folders. Listing + download run over the SimpleShell console
+// (ls/cat), so this is text-oriented — matching the PCB workflow's file types.
+const FB = { path: '/sd/gcodes', loading: false, loaded: false, viewPath: null, viewName: '', viewContent: '' };
+
+async function fbList(path) {
+  const res = await fetch('/api/machine/files?path=' + encodeURIComponent(path));
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || t('common.error'));
+  return data.entries || [];
+}
+
+async function fbOpen(path) {
+  if (!state.machine.connected) { fbNeedConn(); return; }
+  if (FB.loading) return;
+  FB.loading = true;
+  FB.loaded = true;
+  $('#fbList').innerHTML = `<p class="muted">${t('fb.loading')}</p>`;
+  try {
+    const entries = await fbList(path);
+    FB.path = path;
+    fbRender(entries);
+  } catch (err) {
+    $('#fbList').innerHTML = `<p class="muted">${escapeHtml(err.message)}</p>`;
+  } finally {
+    FB.loading = false;
+  }
+}
+
+function fbNeedConn() {
+  $('#fbList').innerHTML = `<p class="muted">${t('fb.needConn')}</p>`;
+  $('#fbCrumbs').innerHTML = '';
+}
+
+function fbChild(name) {
+  return (FB.path.replace(/\/+$/, '') || '') + '/' + name;
+}
+
+function fbRender(entries) {
+  const parts = FB.path.split('/').filter(Boolean);
+  let acc = '';
+  const crumbs = [`<span class="fb-crumb" data-path="/">/</span>`];
+  for (const p of parts) {
+    acc += '/' + p;
+    crumbs.push(`<span class="fb-sep">/</span><span class="fb-crumb" data-path="${escapeHtml(acc)}">${escapeHtml(p)}</span>`);
+  }
+  $('#fbCrumbs').innerHTML = crumbs.join('');
+  $$('#fbCrumbs .fb-crumb').forEach((c) => c.addEventListener('click', () => fbOpen(c.dataset.path || '/')));
+
+  if (!entries.length) { $('#fbList').innerHTML = `<p class="muted">${t('fb.empty')}</p>`; return; }
+  const rows = entries.map((e) => {
+    const full = escapeHtml(fbChild(e.name));
+    const nm = escapeHtml(e.name);
+    if (e.isDir) {
+      return `<div class="fb-row fb-dir" data-dir="${full}"><span class="fb-ic">📁</span><span class="fb-name">${nm}</span><span class="fb-size"></span><span class="fb-when">${fbTime(e.timestamp)}</span><span class="fb-acts"><button class="btn small ghost" data-fbren="${full}" data-name="${nm}">${t('fb.rename')}</button><button class="btn small ghost" data-fbdel="${full}">${t('fb.delete')}</button></span></div>`;
+    }
+    return `<div class="fb-row fb-file"><span class="fb-ic">📄</span><span class="fb-name">${nm}</span><span class="fb-size">${fbBytes(e.size)}</span><span class="fb-when">${fbTime(e.timestamp)}</span><span class="fb-acts"><button class="btn small ghost" data-fbview="${full}" data-name="${nm}">${t('fb.view')}</button><button class="btn small ghost" data-fbdl="${full}" data-name="${nm}">${t('fb.download')}</button><button class="btn small ghost" data-fbren="${full}" data-name="${nm}">${t('fb.rename')}</button><button class="btn small ghost" data-fbdel="${full}">${t('fb.delete')}</button></span></div>`;
+  });
+  const list = $('#fbList');
+  list.innerHTML = rows.join('');
+  $$('[data-dir]', list).forEach((r) => r.addEventListener('click', (e) => { if (e.target.closest('.fb-acts')) return; fbOpen(r.dataset.dir); }));
+  $$('[data-fbview]', list).forEach((b) => b.addEventListener('click', () => fbView(b.dataset.fbview, b.dataset.name)));
+  $$('[data-fbdl]', list).forEach((b) => b.addEventListener('click', () => fbDownload(b.dataset.fbdl, b.dataset.name)));
+  $$('[data-fbren]', list).forEach((b) => b.addEventListener('click', () => fbRename(b.dataset.fbren, b.dataset.name)));
+  $$('[data-fbdel]', list).forEach((b) => b.addEventListener('click', () => fbDelete(b.dataset.fbdel)));
+}
+
+function fbBytes(n) {
+  if (n == null) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(2) + ' MB';
+}
+function fbTime(ts) {
+  if (!ts || ts.length < 12) return '';
+  return `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)} ${ts.slice(8, 10)}:${ts.slice(10, 12)}`;
+}
+
+async function fbView(path, name) {
+  const viewer = $('#fbViewer');
+  $('#fbViewerName').textContent = name;
+  $('#fbViewerBody').textContent = t('fb.loading');
+  viewer.classList.remove('hidden');
+  FB.viewPath = path; FB.viewName = name; FB.viewContent = '';
+  try {
+    const res = await fetch('/api/machine/file?path=' + encodeURIComponent(path));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || t('common.error'));
+    FB.viewContent = data.content || '';
+    $('#fbViewerBody').textContent = FB.viewContent;
+  } catch (err) {
+    $('#fbViewerBody').textContent = err.message;
+  }
+}
+
+async function fbDownload(path, name) {
+  try {
+    const res = await fetch('/api/machine/file?raw=1&path=' + encodeURIComponent(path));
+    if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || t('common.error')); }
+    triggerDownload(await res.blob(), name);
+    toast(t('fb.downloaded', { name }));
+  } catch (err) { toast(err.message, true); }
+}
+
+async function fbRename(path, oldName) {
+  const nn = prompt(t('fb.renamePrompt'), oldName);
+  if (!nn || nn === oldName) return;
+  const dir = path.slice(0, path.lastIndexOf('/'));
+  try { await api('/api/machine/file/rename', { from: path, to: dir + '/' + nn }); toast(t('fb.renamed')); fbOpen(FB.path); }
+  catch (err) { toast(err.message, true); }
+}
+
+async function fbDelete(path) {
+  if (!confirm(t('fb.deleteConfirm', { path }))) return;
+  try { await api('/api/machine/file/delete', { path }); toast(t('fb.deleted')); fbOpen(FB.path); }
+  catch (err) { toast(err.message, true); }
+}
+
+async function fbMkdir() {
+  const name = prompt(t('fb.mkdirPrompt'), '');
+  if (!name) return;
+  try { await api('/api/machine/file/mkdir', { path: fbChild(name) }); toast(t('fb.mkdirDone')); fbOpen(FB.path); }
+  catch (err) { toast(err.message, true); }
+}
+
+function fbBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  return btoa(bin);
+}
+
+async function fbUploadFile(file) {
+  if (!file) return;
+  try {
+    const b64 = fbBase64(await file.arrayBuffer());
+    await api('/api/machine/file/upload', { path: fbChild(file.name), contentBase64: b64 });
+    toast(t('fb.uploaded', { name: file.name }));
+    fbOpen(FB.path);
+  } catch (err) { toast(err.message, true); }
+}
+
+function fbUp() {
+  const p = FB.path.replace(/\/+$/, '');
+  fbOpen(p.slice(0, p.lastIndexOf('/')) || '/');
+}
+
+function bindFileBrowser() {
+  $('#fbRefresh')?.addEventListener('click', () => fbOpen(FB.path));
+  $('#fbUp')?.addEventListener('click', fbUp);
+  $('#fbMkdir')?.addEventListener('click', fbMkdir);
+  $('#fbUpload')?.addEventListener('click', () => $('#fbFileInput')?.click());
+  $('#fbFileInput')?.addEventListener('change', (e) => { const f = e.target.files?.[0]; if (f) fbUploadFile(f); e.target.value = ''; });
+  $('#fbSection')?.addEventListener('toggle', (e) => { if (e.target.open && state.machine.connected && !FB.loaded) fbOpen(FB.path); });
+  $('#fbViewerClose')?.addEventListener('click', () => $('#fbViewer').classList.add('hidden'));
+  $('#fbViewer')?.addEventListener('click', (e) => { if (e.target === $('#fbViewer')) $('#fbViewer').classList.add('hidden'); });
+  $('#fbViewerDl')?.addEventListener('click', () => { if (FB.viewPath) fbDownload(FB.viewPath, FB.viewName); });
+  $('#fbViewerCopy')?.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(FB.viewContent || ''); toast(t('log.copied')); }
+    catch { toast(t('common.error'), true); }
+  });
 }
 
 // ---------- connection profiles ----------
@@ -3255,6 +3660,10 @@ function projectSnapshot() {
     tools: state.tools,
     assignment: state.assignment,
     layers: state.layers,
+    // Fabrication progress: which steps are ticked off + the opened step, so a
+    // reload lands you back where you were.
+    fabDone: state.fab.done,
+    fabView: state.fab.view,
     aiModel: $('#aiModel')?.value || '',
     log: state.projectLog,
     conn: { ip: $('#mIp')?.value.trim() || '', port: Number($('#mPort')?.value) || 2222 },
@@ -3297,6 +3706,8 @@ function applyProject(p, { freshProject = true } = {}) {
   }
   state.projectLog = Array.isArray(p.log) ? p.log.slice() : [];
   renderLog();
+  loadMachineLog(); // per-project machine console (continuous across reloads)
+  renderMachineConsole();
   $('#generate').disabled = !state.files.copper;
   state.result = null;
   if (freshProject) {
@@ -3307,9 +3718,13 @@ function applyProject(p, { freshProject = true } = {}) {
     renderHeightMapPanel();
     renderToolChangeOverlay(state.machine.status); // overlay follows live status only
     if (state.machine.connected) pollStatus(); // refresh the live status once
-  } else {
-    state.fab.done = {}; state.fab.view = null;
   }
+  // Restore the saved fabrication progress (ticks + opened step) from the
+  // project — after resetProjectScopedState, so a reload/load lands you back
+  // where you were. A blank/new project has none → starts fresh.
+  state.fab.done = (p.fabDone && typeof p.fabDone === 'object') ? { ...p.fabDone } : {};
+  state.fab.view = Number.isInteger(p.fabView) ? p.fabView : null;
+  resetSettingsBaseline(); // don't log the just-applied values as "changes"
   renderSetupAssistant();
   renderTools();
   renderAssignments();
@@ -3341,6 +3756,27 @@ function projSaveAs() {
   try { saveProjects(projs); } catch { return toast(t('proj.saveFail'), true); }
   setCurrentProjectId(id); renderProjects();
   toast(t('proj.saved', { name }));
+}
+// Debounced auto-save of the current project so config changes (placement
+// offset, feeds, material, tool assignment, …) survive a page reload WITHOUT a
+// manual "Save". When no project is open yet but a board is loaded, a project
+// is created automatically so nothing is ever silently lost.
+let autosaveTimer = null;
+function autosaveProject() {
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(() => {
+    if (!hasWorkspace()) return; // nothing meaningful to persist without a board
+    const projs = loadProjects();
+    let cur = currentProjectId();
+    if (!cur || !projs[cur]) {
+      cur = 'p' + Date.now().toString(36);
+      setCurrentProjectId(cur);
+      projs[cur] = { name: t('proj.defaultName'), createdAt: Date.now() };
+    }
+    const prev = projs[cur];
+    projs[cur] = { ...prev, ...projectSnapshot(), name: prev.name || t('proj.defaultName'), createdAt: prev.createdAt || Date.now() };
+    try { saveProjects(projs); renderProjects(); } catch { /* storage full — manual Save still available */ }
+  }, 500);
 }
 function projSave() {
   const cur = currentProjectId();
@@ -3434,6 +3870,7 @@ function init() {
 
   $$('[data-layer]').forEach((cb) => cb.addEventListener('change', () => {
     state.layers[cb.dataset.layer] = cb.checked;
+    autosaveProject(); // remember layer visibility across reloads too
     if (!state.result) return;
     if (state.view === '3d' && state.viewer3d) state.viewer3d.setLayers(state.layers); else drawPreview();
   }));
@@ -3456,10 +3893,13 @@ function init() {
   });
   $('#dockToggle').addEventListener('click', () => toggleDock());
   $('#dockGoMachine').addEventListener('click', () => switchWf('machine'));
-  $('#dockCopyLog').addEventListener('click', copyMachineLog);
-  $('#mConsoleCopy')?.addEventListener('click', copyMachineLog);
+  $('#dockCopyLog').addEventListener('click', () => copyLogText(state.logTab));
+  $('#dockExportLog')?.addEventListener('click', () => exportLogText(state.logTab));
+  $('#mConsoleCopy')?.addEventListener('click', () => copyLogText('machine'));
   $('#mConsoleAiBtn')?.addEventListener('click', aiDiagnose);
   $('#dockAiBtn')?.addEventListener('click', aiDiagnose);
+  $$('.log-tab').forEach((b) => b.addEventListener('click', () => setLogTab(b.dataset.logtab)));
+  setLogTab(loadJSON('makera_logtab', 'machine'));
   if (loadJSON('makera_dock', false)) toggleDock(true);
   $('#mDiscover').addEventListener('click', machineDiscover);
   $('#mConnect').addEventListener('click', machineConnect);
@@ -3475,6 +3915,7 @@ function init() {
   initHelpTips();
   $('#mUpload').addEventListener('click', () => machineUpload(false));
   $('#mRun').addEventListener('click', () => machineUpload(true));
+  bindFileBrowser();
   $('#machDiag').addEventListener('click', (e) => { if (e.target && e.target.id === 'machRetry') machineRetry(); });
 
   // material presets
@@ -3513,11 +3954,13 @@ function init() {
   $('#mProfiles').addEventListener('change', selectConn);
   $('#mSaveConn').addEventListener('click', saveConn);
   $('#mDelConn').addEventListener('click', deleteConn);
+  ['#mIp', '#mPort'].forEach((sel) => $(sel)?.addEventListener('change', autosaveProject)); // persist connection into the project
 
   // AI
   const savedKey = loadJSON('makera_aikey', '');
   if (savedKey) { $('#aiKey').value = savedKey; setAiPill('on', t('ai.ready')); }
   $('#aiKey').addEventListener('input', () => { updateActionButtons(); });
+  $('#aiModel')?.addEventListener('change', autosaveProject); // persist model choice into the project
   $('#aiReview').addEventListener('click', aiReview);
 
   // Demo
@@ -3528,6 +3971,16 @@ function init() {
   $('#fabPlay').addEventListener('click', fabPlay);
   $('#fabStop').addEventListener('click', fabStop);
   $('#logClear').addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); state.projectLog = []; const cur = currentProjectId(); const projs = loadProjects(); if (cur && projs[cur]) { projs[cur].log = []; saveProjects(projs); } renderLog(); });
+  $('#fabLogCopy')?.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); copyProcessLog(); });
+  $('#fabRestart')?.addEventListener('click', () => {
+    if (!state.result && !Object.keys(state.fab.done).length) return;
+    if (jobActive()) return toast(t('job.alreadyRunning'), true);
+    if (!confirm(t('fab.restartConfirm'))) return;
+    state.fab.done = {}; state.fab.view = null;
+    renderFab(); drawFab(); autosaveProject();
+    logEvent('log.processRestart', {});
+    toast(t('fab.restarted'));
+  });
 
   // language switcher
   const langSel = $('#langSel');
@@ -3566,6 +4019,10 @@ function init() {
   const cur = currentProjectId();
   const projs = loadProjects();
   if (cur && projs[cur]) applyProject(projs[cur], { freshProject: false });
+  resetSettingsBaseline(); // baseline for the settings audit log (no project → defaults)
+  loadMachineLog(); // restore the per-project machine console buffer
+  renderMachineConsole();
+  renderStartPoint();
 }
 
 async function loadExample() {

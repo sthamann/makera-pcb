@@ -5,9 +5,10 @@ import { parseGerber, toFilledPolygons } from './gerber/parser.js';
 import { parseExcellon } from './excellon/parser.js';
 import { generateIsolation } from './cam/isolation.js';
 import { generateClearing } from './cam/clearing.js';
+import { generateMaskRemoval } from './cam/mask.js';
 import { generateDrill } from './cam/drill.js';
 import { generateOutline } from './cam/outline.js';
-import { isolationGcode, clearingGcode, drillGcode, outlineGcode, combinedGcode, laserGcode } from './cam/gcode.js';
+import { isolationGcode, clearingGcode, maskGcode, drillGcode, outlineGcode, combinedGcode, laserGcode } from './cam/gcode.js';
 import { runChecks } from './cam/checks.js';
 import { buildReport } from './report.js';
 import {
@@ -97,6 +98,17 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
     warnings.push('No drill file provided — drilling step skipped.');
   }
 
+  // Optional solder-mask removal: derive the pad areas from copper + drills and
+  // pocket-clear the cured UV mask off them with the removal bit (own program,
+  // runs AFTER the manual apply/cure steps — never part of the combined job).
+  let maskGen = { paths: [], plunges: [], toolDiameter: SOLDER_MASK_REMOVER_DIAMETER };
+  if (cfg.solderMask?.enable) {
+    maskGen = generateMaskRemoval(copperPolys, drillGen.groups, cfg, SOLDER_MASK_REMOVER_DIAMETER);
+    if (!maskGen.paths.length && !maskGen.plunges.length) {
+      warnings.push('Lötstopplack aktiviert, aber keine Pad-Flächen ableitbar (Kupfer/Bohrungen prüfen).');
+    }
+  }
+
   let outlineGen = { loops: [], warnings: [], cutterDiameter: cfg.outline.cutterDiameter };
   if (outlineStrokes.length) {
     outlineGen = generateOutline(outlineStrokes, cfg);
@@ -147,6 +159,17 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
       withTool('clearing', 'clearing'),
       gcodeOrigin,
       resolveFileTool('clearing', cfg.clearing.rpm, DEFAULT_TOOL_NUMBER.clearing),
+    );
+  }
+
+  if (cfg.solderMask?.enable && (maskGen.paths.length || maskGen.plunges.length)) {
+    const name = '1c_soldermask_removal.nc';
+    fileNames.maskRemove = name;
+    files[name] = maskGcode(
+      maskGen,
+      withTool('solderMask', 'maskRemove'),
+      gcodeOrigin,
+      resolveFileTool('maskRemove', cfg.solderMask.rpm, DEFAULT_TOOL_NUMBER.maskRemove),
     );
   }
 
@@ -284,7 +307,7 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
   }
 
   // Rough machining-time estimates per operation (for the live fabrication view).
-  const times = estimateTimes({ iso, clearing, drillGroupsSorted, outlineGen, silkStrokes, laserOn, cfg, withTool });
+  const times = estimateTimes({ iso, clearing, maskGen, drillGroupsSorted, outlineGen, silkStrokes, laserOn, cfg, withTool });
 
   const checks = runChecks({
     copperPolys,
@@ -316,6 +339,9 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
     origin, board, copperPolys, silkPolys, iso, drillGen, outlineGen, cfg,
     laserStrokes: laserOn ? silkStrokes : [],
     clearingPaths: cfg.clearing.enable ? clearing.paths : [],
+    maskPaths: cfg.solderMask?.enable ? maskGen.paths : [],
+    maskPlunges: cfg.solderMask?.enable ? maskGen.plunges : [],
+    maskToolDiameter: maskGen.toolDiameter,
   });
 
   return {
@@ -342,7 +368,7 @@ export function runPipeline({ copper, edge, drill, silk, config = {} } = {}) {
 }
 
 // Rough time model: cutting distance / feed + per-feature plunge/travel overhead.
-function estimateTimes({ iso, clearing, drillGroupsSorted, outlineGen, silkStrokes, laserOn, cfg, withTool }) {
+function estimateTimes({ iso, clearing, maskGen, drillGroupsSorted, outlineGen, silkStrokes, laserOn, cfg, withTool }) {
   const segLen = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
   const ringLen = (r) => { let L = 0; for (let i = 1; i < r.length; i++) L += segLen(r[i - 1], r[i]); if (r.length > 1) L += segLen(r[r.length - 1], r[0]); return L; };
   const byOp = {};
@@ -362,6 +388,14 @@ function estimateTimes({ iso, clearing, drillGroupsSorted, outlineGen, silkStrok
     let rings = 0;
     for (const r of clearing.paths) { L += ringLen(r); rings++; }
     byOp.clearing = (L / Math.max(1, c.feedXY)) * 60 + rings * 1.0;
+  }
+  // solder-mask removal (× passes — the whole pad set is traced repeatedly)
+  if (maskGen && (maskGen.paths.length || (maskGen.plunges || []).length)) {
+    const c = withTool('solderMask', 'maskRemove').solderMask;
+    const passes = Math.max(1, Math.round(c.passes ?? 1));
+    let L = 0;
+    for (const r of maskGen.paths) L += ringLen(r);
+    byOp.maskRemove = passes * ((L / Math.max(1, c.feedXY)) * 60 + maskGen.paths.length * 0.5 + (maskGen.plunges || []).length * 1);
   }
   // drilling
   for (const g of drillGroupsSorted) {
@@ -389,13 +423,15 @@ function estimateTimes({ iso, clearing, drillGroupsSorted, outlineGen, silkStrok
   return { byOp, total };
 }
 
-function buildPreview({ origin, board, copperPolys, silkPolys, iso, drillGen, outlineGen, cfg, laserStrokes, clearingPaths }) {
+function buildPreview({ origin, board, copperPolys, silkPolys, iso, drillGen, outlineGen, cfg, laserStrokes, clearingPaths, maskPaths, maskPlunges, maskToolDiameter }) {
   const tx = (x, y) => [round(x - origin.x), round(y - origin.y)];
   const copper = copperPolys.map((ring) => ring.map(([x, y]) => tx(x, y)));
   const silk = (silkPolys || []).map((ring) => ring.map(([x, y]) => tx(x, y)));
   const laser = (laserStrokes || []).map((line) => line.map(([x, y]) => tx(x, y)));
   const isolation = iso.passes.map((pass) => pass.rings.map((ring) => ring.map(([x, y]) => tx(x, y))));
   const clearing = (clearingPaths || []).map((ring) => ring.map(([x, y]) => tx(x, y)));
+  const maskRemoval = (maskPaths || []).map((ring) => ring.map(([x, y]) => tx(x, y)));
+  const maskPlungeDots = (maskPlunges || []).map(([x, y]) => { const [px, py] = tx(x, y); return { x: px, y: py, d: maskToolDiameter || 0.3 }; });
   const drills = [];
   for (const g of drillGen.groups) {
     for (const [x, y] of g.holes) {
@@ -410,7 +446,7 @@ function buildPreview({ origin, board, copperPolys, silkPolys, iso, drillGen, ou
       return { x, y, tab: !!p.tab };
     }),
   }));
-  return { board, thickness: cfg.material.thickness, copper, silk, laser, isolation, clearing, drills, outline };
+  return { board, thickness: cfg.material.thickness, copper, silk, laser, isolation, clearing, maskRemoval, maskPlunges: maskPlungeDots, drills, outline };
 }
 
 function round(v) {

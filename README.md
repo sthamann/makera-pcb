@@ -169,6 +169,12 @@ running a later step first asks for an explicit confirmation.
    or legacy plain-text). Then: live status, MDI, **Upload** and **Upload & start (play)**.
 3. **Connection profiles** — save IP/port as a named profile.
 
+**SD file browser** (collapsible in the Machine tab): browse the machine's SD card (`ls`),
+view text files inline and download them (`cat`, reliable over TCP, no QuickLZ — for
+G-code/Gerber/drill/`config.txt`), upload your own files into the current folder (framed file
+transfer), create folders, rename and delete. This lets you inspect the bundled Makera
+examples under `Examples/…` (e.g. `Examples/LED/PCB-UV-MASK(PART2).nc`).
+
 A **setup assistant** at the top of the Machine tab walks you through every new
 project with live state detection: 1 connect → 2 homing/alarm (with an
 “acknowledge alarm” button) → 3 place the board at anchor 1 → 4 set the origin →

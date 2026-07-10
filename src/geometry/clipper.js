@@ -145,6 +145,23 @@ export function difference(subject, clip) {
   return fromClipper(solution);
 }
 
+// Boolean intersection: subject ∩ clip (both closed polygon sets). Used to keep
+// derived pad regions strictly on top of actual copper.
+export function intersection(subject, clip) {
+  if (!subject.length || !clip.length) return [];
+  const c = new ClipperLib.Clipper();
+  c.AddPaths(toClipper(subject), ClipperLib.PolyType.ptSubject, true);
+  c.AddPaths(toClipper(clip), ClipperLib.PolyType.ptClip, true);
+  const solution = new ClipperLib.Paths();
+  c.Execute(
+    ClipperLib.ClipType.ctIntersection,
+    solution,
+    ClipperLib.PolyFillType.pftNonZero,
+    ClipperLib.PolyFillType.pftNonZero,
+  );
+  return fromClipper(solution);
+}
+
 // Number of distinct outer contours (islands). After a union, outer contours
 // all share one winding and holes have the opposite. The ring with the largest
 // absolute area is always an outer, so its sign defines the "outer" sign; we

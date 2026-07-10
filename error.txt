@@ -1,0 +1,368 @@
+================================================================================
+CARVERA AIR – Z-ACHSEN-FEHLER: VOLLSTÄNDIGE FEHLERBESCHREIBUNG
+Erstellt: 2026-07-10  |  Kontext: makera-pcb Web-App + Carvera Air
+================================================================================
+
+--------------------------------------------------------------------------------
+0) KURZFASSUNG (TL;DR)
+--------------------------------------------------------------------------------
+- Während des Isolations-Schritts, beim automatischen Werkzeugwechsel/Längen-
+  messen (M6 T1), hat die Z-Achse nach der Messung NICHT abgehoben ("G53 G0
+  Z-20") und ist in "ALARM: Z motor alarm triggered - reset required" gelaufen.
+  Dabei ist der in der Spindel sitzende T1-Fräser abgebrochen.
+- Seitdem: jede Z-Bewegung (Homing) endet nach wenigen mm im selben Z-Motor-
+  Alarm. Inzwischen kommt der Alarm sofort NACH dem Entsperren ($X) – also
+  bereits IM STILLSTAND, ohne dass eine Bewegung kommandiert wurde.
+- Alle Endschalter/Taster/Probe/Toolsensor sind sauber (nicht ausgelöst).
+- Bewertung: HARDWARE-Fehler des Z-Antriebs (integrierter Closed-Loop-Treiber
+  am Z-Motor) bzw. dessen Verkabelung – ausgelöst/verursacht durch den Crash.
+  KEIN Software-, Sensor- oder G-Code-Problem.
+- Leitverdacht (wegen "Alarm schon im Stillstand"): loser/beschädigter Z-Motor-
+  Stecker (Encoder-/Alarm-Leitung) durch den Crash, ODER defekter integrierter
+  Z-Treiber. => ZUERST Z-Motorstecker neu stecken.
+
+--------------------------------------------------------------------------------
+1) MASCHINE & UMGEBUNG
+--------------------------------------------------------------------------------
+- Maschine:      Makera Carvera AIR
+- Mainboard:     "CarveraAirBoard V1.9 / MAKERA" (per Foto bestätigt)
+- Firmware:      1.0.6 (Makera, "version" liefert: version = 1.0.6)
+- Modell-Feld:   Statusfeld C:2 => CARVERA_AIR (Firmware-Enum: CARVERA=1,
+                 CARVERA_AIR=2)
+- Netzwerk:      IP 192.168.1.141, TCP-Port 2222 (Ping ~15 ms, stabil)
+- Protokoll:     "framed" (Makera-Binärprotokoll), NICHT das alte Klartext-
+                 Protokoll. Erkennung automatisch beim Verbinden.
+- Motoren:       Closed-Loop-Schrittmotoren mit INTEGRIERTEM Treiber + Encoder
+                 direkt am Motor (Modul hinten am Stepper). Der Treiber meldet
+                 nach außen NUR einen einzelnen digitalen Alarm-Pin.
+
+--------------------------------------------------------------------------------
+2) WIE DIE SOFTWARE DIE MASCHINE ANSTEUERT/ABFRAGT (TECHNISCH)
+--------------------------------------------------------------------------------
+Architektur:
+  Browser-UI  ->  lokaler Node-Server (Port 4321)  ->  TCP  ->  Carvera (2222)
+  Der Server hält EINE TCP-Verbindung; UI und Skripte teilen sie sich.
+
+Framed-Protokoll (Makera, Firmware >= ~1.0.5):
+  - Rahmen:      0x86 0x68 | len(2) | ptype(1) | payload | crc16(2) | 0x55 0xAA
+  - CRC:         CRC-16/XMODEM über (len + ptype + payload)
+  - Steuerbytes: ptype 0xA1 (single, z.B. '?', '!', '~', Reset 0x18),
+                 ptype 0xA2 (multi = Kommando-/G-Code-Zeile)
+  - Datei:       ptype 0xB0 START ("upload <p>\n" / "download <p>\n"),
+                 0xB1 MD5, 0xB2 VIEW (total+packetSize), 0xB3 DATA (seq+chunk),
+                 0xB4 END, 0xB5 CANCEL, 0xB6 RETRY
+  - Text/Status: Status-Frames "<...>" und Zeilen kommen als Text-Frames zurück.
+
+Status-Abfrage (Polling):
+  - Es wird zyklisch ein framed '?' (0xA1, 0x3F) gesendet.
+  - Antwort z.B.:
+    <Alarm|MPos:0.0000,0.0000,2.1484,0.0000,0.0000|WPos:...|F:...|S:...|
+     T:1,0.000,-1|W:0.00|L:...|H:24|C:2,1,0,1>
+  - Wichtige Felder:
+      MPos = Maschinenkoordinaten (X,Y,Z,A,B)
+      WPos = Werkstückkoordinaten
+      W:   = Wired-Probe-Spannung (0.00 = nicht ausgelöst)
+      H:   = Halt-Grund (siehe Abschnitt 4)
+      C:   = Modell, FuncSetting, inch, absolute  (C:2 => Carvera Air)
+
+Kommandos (MDI/G-Code/Shell):
+  - Werden als framed 0xA2-Frame mit "<zeile>\n" gesendet.
+  - Konsolen-Ausgaben (ls/diagnose/M119/version...) kommen als Text-Frames
+    zurück und werden im Maschinen-Log gesammelt.
+
+REST-Endpunkte des Servers (Auszug), die für die Diagnose genutzt wurden:
+  POST /api/machine/connect      {ip, port}          Verbindung aufbauen
+  GET  /api/machine/status                            aktueller Status (s.o.)
+  GET  /api/machine/log                               rollendes Log (bis 400 Z.)
+  POST /api/machine/command      {line}               beliebige Zeile senden
+  POST /api/machine/jog          {axis, dist, feed}   -> "$J <axis><dist> F<f>"
+  POST /api/machine/realtime     {code}               pause/resume/reset
+  GET  /api/machine/files?path=..                     Verzeichnis (ls -s)
+  GET  /api/machine/file?path=..[&raw=1]              Datei laden (framed DL)
+  POST /api/machine/file/upload  {path, contentBase64} Datei schreiben (framed)
+
+Datei-Download (neu implementiert): framed Pull – wir senden 0xB0
+"download <p>\n", dann 0xB1(md5-Anfrage) -> 0xB2(VIEW) -> 0xB3(DATA je Sequenz)
+-> 0xB4(END). Funktioniert im Idle; im ALARM bedient die Firmware keine Datei-
+Transfers (Timeout).
+
+--------------------------------------------------------------------------------
+3) ABLAUF DES VORFALLS (CHRONOLOGISCH, AUS DEM MASCHINEN-LOG)
+--------------------------------------------------------------------------------
+Beim Abspielen von /sd/gcodes/1_isolation.nc – im firmware-eigenen M6-Werkzeug-
+wechsel (unser G-Code enthält nur "M6 T1"; alles Folgende ist Firmware-ATC):
+
+  G53 G0 Z-3.000                         (Z hoch, Maschinenkoord.)
+  G53 G0 X-30.310 Y-4.643                (zur Werkzeugwechsel-Position)
+  M497.2 / M490.1 / M493.2 T1 / M497.3   (ATC-Makros)
+  G53 G0 X-8.310 Y-4.643                 (zum Längensensor)
+  G38.6 Z-108.000 F500.000
+  [PRB:-8.309,-4.644,-89.639:1]          (Längenmessung: Kontakt bei Z-89.639)
+  G91 G0 Z2.000
+  G38.6 Z-3.000 F100.000
+  [PRB:-8.309,-4.644,-89.631:1]          (2. Messkontakt)
+  M493.1
+  G53 G0 Z-20.000                        (Z SOLL hochfahren)  <-- HIER
+  M494.2
+  ALARM: Z motor alarm triggered -  reset required            <-- FEHLER
+  Aborted by halt
+  Done ATC
+
+=> Z hat nach der Messung NICHT abgehoben, der Antrieb kippte in den Motor-
+   Alarm; der noch unten am Sensor stehende Fräser (T1) ist abgebrochen, weil
+   die Sequenz weiterlief statt Z sauber hochzufahren.
+
+Zur Einordnung: Die Messung des PROBE-Werkzeugs (T0) kurz vorher UND ein
+komplettes Auto-Leveling (viele Z-Antast-Bewegungen) liefen problemlos. Der
+Fehler trat also erst beim/nach dem Anheben mit dem längeren Fräs-Werkzeug auf.
+
+--------------------------------------------------------------------------------
+4) DIAGNOSE-DATEN (LIVE VON DER MASCHINE GELESEN)
+--------------------------------------------------------------------------------
+Halt-Codes (Firmware-Enum HALT_REASON, Feld "H:"):
+   1 MANUAL         2 HOME_FAIL      3 PROBE_FAIL     4 CALIBRATE_FAIL
+   5 ATC_HOME_FAIL  6 ATC_TOOL_INVALID  7 ATC_NO_TOOL  8 ATC_HAS_TOOL
+   9 SPINDLE_OVERHEATED  10 SOFT_LIMIT  11 COVER_OPEN  12 PROBE_INVALID
+   13 E_STOP  14 POWER_OVERHEATED  15 NON_HOME  16 CRASH_DETECTED
+   21 HARD_LIMIT  22 MOTOR_ERROR_X  23 MOTOR_ERROR_Y  24 MOTOR_ERROR_Z
+   25 SPINDLE_STALL  26 SD_ERROR  41 SPINDLE_ALARM
+   -> Beim Crash: H:24 = MOTOR_ERROR_Z. Bei Homing-Versuchen: H:2 = HOME_FAIL.
+
+M119 (Endschalter/Probe-Zustände) – MEHRFACH gelesen, immer identisch:
+   X_max:0  Y_max:0  Z_max:0  A_min:1
+   (XL)P0.24:0  (YL)P0.25:0  (ZL)P1.1:0  (AL)P1.9:1   Probe: 0
+   -> KEIN Endschalter/Probe ausgelöst. Die "1" bei A ist die NICHT vorhandene
+      4./Dreh-Achse (schwebender Eingang) und irrelevant.
+
+diagnose (Sensor-/Board-Zustände):
+   {S:0,10000|L:0,0|V:1,31|F:0,0|G:1,0,0,0,0|T:0|C:1|E:0,0,0,0,0,0,1,1|
+    P:0,0|I:0|RSSI:-59}
+   -> T:0  = Werkzeug-Längensensor NICHT ausgelöst
+   -> P:0,0 = Probe UND Kalibriersensor NICHT ausgelöst
+   -> E:...,1,1 = A/B-Achse (nicht vorhanden) -> normal
+   -> RSSI -59 = WLAN ok
+
+Homing-Test ($X dann $H), live mitgelesen:
+   [Caution: Unlocked]
+   ok
+   ALARM: Z motor alarm triggered -  reset required   (2x)
+   ALARM: Homing fail
+   -> Z fuhr dabei ~7 mm hoch (MPos Z von ~0.0 auf ~7.21), dann Abbruch.
+      Stoppte MITTIG im Verfahrweg, NICHT am oberen Anschlag (Z_max blieb 0).
+
+Aktueller Zustand (nach weiteren Neustarts):
+   $X  ->  [Caution: Unlocked] / ok  ->  SOFORT wieder
+           "ALARM: Z motor alarm triggered", H:24, OHNE Bewegung.
+   -> Der Z-Treiber zieht seinen Alarm-Pin also inzwischen bereits IM
+      STILLSTAND. Solange der Pin aktiv ist, blockt die Firmware ALLE Achsen
+      (auch X/Y) -> Jog/Bewegung nicht möglich.
+
+Motor-/Treiber-Konfig:
+   "config-get sd gamma_current / gamma_max_rate / ..." => "is not in config".
+   -> Die Z-Motor-/Treiberparameter liegen NICHT in der config.txt, sondern im
+      integrierten Closed-Loop-Treiber (Hardware). Firmware/Config können daran
+      nichts einstellen.
+
+--------------------------------------------------------------------------------
+5) WIE DER "Z MOTOR ALARM" TECHNISCH ENTSTEHT (FIRMWARE-QUELLE)
+--------------------------------------------------------------------------------
+Aus der (quelloffenen) Community-Firmware, Endstops.cpp – identische Logik:
+
+   // je Achse ein optionaler "<achse>_motor_alarm_pin" (Default "nc")
+   while (pin->get()) {                       // liest EINEN GPIO-Eingang
+       if (++debounce >= debounce_count) {
+           printf("ALARM: %c motor alarm triggered - reset required\n", axis);
+       }
+   }
+
+=> Das Mainboard liest nur EINEN digitalen Alarm-Pin vom Z-Treiber. Ob intern
+   Überstrom, Stall, Schleppfehler oder Übertemperatur vorliegt, ENTSCHEIDET
+   DER TREIBER SELBST und übermittelt es NICHT an die CPU. Es gibt daher
+   firmware-seitig KEINE genauere Ursache – "Pin aktiv" ist die ganze Info.
+   MOTOR_ERROR_Z gehört zur Klasse "reset required": es setzt halted=true und
+   blockiert JEDE Bewegung, bis der Alarm-Pin wieder inaktiv ist (nur durch
+   Power-Cycle bzw. Beheben der Ursache).
+
+--------------------------------------------------------------------------------
+6) THEORIEN ZUR URSACHE (nach Wahrscheinlichkeit)
+--------------------------------------------------------------------------------
+Alle Beobachtungen zeigen auf den Z-ANTRIEB (Motor/Treiber/Kabel), NICHT auf
+Sensorik/Software:
+
+(A) LOSER/BESCHÄDIGTER Z-MOTORSTECKER (Encoder-/Alarm-Leitung) durch den Crash
+    -> LEITVERDACHT. Begründung: Der Alarm kommt inzwischen SCHON IM STILLSTAND
+       (ohne Bewegung). Ein Schlepp-/Stall-Fehler entsteht normalerweise nur
+       WÄHREND einer Bewegung. Ein Alarm im Ruhezustand deutet stark auf ein
+       elektrisches Problem an der Alarm-/Encoder-Leitung (Wackelkontakt) hin.
+    -> Gut, weil potenziell ohne Ersatzteil behebbar (neu stecken).
+
+(B) DEFEKTER INTEGRIERTER Z-TREIBER / MOTOR-ENCODER (durch Crash beschädigt)
+    -> Der Treiber meldet dauerhaft Fehler. Nur Reparatur/Tausch hilft.
+
+(C) MECHANISCHE BLOCKADE / SCHWERGÄNGIGKEIT im Z-Verfahrweg
+    -> Weniger wahrscheinlich, da der Alarm auch OHNE Bewegung kommt; eine reine
+       Mechanik-Blockade würde erst beim Fahren auffallen. Trotzdem prüfen
+       (Späne/abgebrochene Reste/Beschädigung an Spindel & Führung).
+
+Auslöser in allen Fällen: der harte Crash beim Werkzeugwechsel (Z hob nicht ab,
+Fräser brach) hat den Z-Antrieb bzw. dessen Verkabelung mit hoher Wahrschein-
+lichkeit beschädigt/gelockert.
+
+--------------------------------------------------------------------------------
+7) WAS BEREITS VERSUCHT WURDE
+--------------------------------------------------------------------------------
+- Mehrfach Reset / "Entsperren ($X)": Alarm rastet sofort wieder ein.
+- Mehrfach kompletter POWER-CYCLE: Fehler reproduzierbar, nicht behoben.
+- Homing ($H): Z fährt wenige mm, dann Z-Motor-Alarm + Homing fail.
+- Jog-Versuche (X/Z): werden verworfen, weil bei aktivem Z-Alarm ALLE Achsen
+  gesperrt sind (getestet: MPos ändert sich nicht).
+- Schalter/Sensoren via M119 + diagnose gelesen: ALLE sauber (nichts ausgelöst).
+- config-get der Z-Motorparameter: "not in config" (liegen im Treiber, nicht
+  in der Config).
+- Firmware-Quelle geprüft: der Alarm ist ein einzelner GPIO-Pin, keine
+  Detail-Ursache verfügbar.
+- Fotos der Elektronik ausgewertet: Mainboard (Air V1.9) Status-LED normal
+  (blau/grün), separate Spindel-/Leistungsplatine grüne LED = versorgt/ok.
+  Der Z-STEPPER-Treiber ist NICHT auf diesen Platinen, sondern integriert am
+  Z-Motor (oben an der Z-Säule) -> dort ist ggf. eine Fehler-LED sichtbar.
+- (Nebenbei, NICHT ursächlich) Original-Makera-Beispiel PCB-UV-MASK(PART2).nc
+  von der Maschine geladen und den Lack-Entfern-Generator daran ausgerichtet
+  (M6 Auto-Messung, Z-0.2, 1 Durchgang). Betrifft nur den Lack-Schritt, hat
+  mit dem Z-Motor-Alarm nichts zu tun.
+
+--------------------------------------------------------------------------------
+8) IST EIN "PATCH" MÖGLICH, UM TROTZ ALARM ZU BEWEGEN? (FÜR ZUGANG ZUM Z-MOTOR)
+--------------------------------------------------------------------------------
+Frage: Kann man die Maschine trotz Z-Alarm auf X bewegen, um an den Z-Motor
+       heranzukommen?
+
+Grundproblem: Solange der Z-Treiber seinen Alarm-Pin zieht, setzt die Firmware
+"halted" und sperrt JEDE Achse. $X hebt nur die Sperre kurz auf – der aktive
+Alarm-Pin re-halted sofort. Um X bewegen zu können, müsste die Firmware den
+Z-Alarm IGNORIEREN.
+
+Möglichkeit A – CONFIG (ohne Firmware bauen):  ==> AUF DIESER MASCHINE NICHT MÖGLICH.
+  Idee war: Z-Motor-Alarm-Pin in config.txt auf "nc" setzen, Reboot -> Alarm
+  wird nicht mehr überwacht -> X-Jog möglich. Achse Z = "gamma" (Firmware:
+  alpha=X, beta=Y, gamma=Z).
+  VERIFIZIERT AN DER MASCHINE (config-get sd ...): ALLE relevanten Keys liefern
+  "is not in config":
+      gamma_motor_alarm_pin  -> is not in config
+      beta_motor_alarm_pin   -> is not in config
+      alpha_motor_alarm_pin  -> is not in config
+      gamma_max_endstop      -> is not in config
+      gamma_steps_per_mm     -> is not in config
+  D.h. die Makera-Air-Firmware liest Endschalter-/Schritt-/Motor-Alarm-
+  Einstellungen NICHT aus der editierbaren config.txt (fest in Firmware/Factory-
+  Daten). Es gibt also keinen Eintrag, den man auf "nc" setzen könnte; ein
+  hinzugefügter Key würde ignoriert. => Weg A entfällt.
+
+Möglichkeit B – FIRMWARE PATCHEN & FLASHEN:
+  Community-Firmware bauen (ARM-Toolchain) mit deaktiviertem Z-Alarm-Check und
+  auf die Maschine flashen (Upload nach /sd/firmware.bin -> Reset -> Bootloader
+  flasht). Technisch möglich (Binary v2.1.0c validiert vorhanden), ABER:
+  - Hoher Aufwand + BRICK-RISIKO, besonders auf der Carvera AIR (Community-FW
+    ist primär auf die Standard-Carvera ausgelegt).
+  - Erschwert Makera-Garantie/Support.
+  - Gleicher Sicherheitsverlust wie A, nur aufwendiger/riskanter.
+  => NICHT empfohlen.
+
+Wichtig für BEIDE Wege: Selbst wenn die Bewegung "freigeschaltet" wird, ist der
+Z-Antrieb weiterhin defekt. Man bewegt dann ein hart ausgefallenes Achssystem
+OHNE dessen Schutzmechanismus. Das behebt NICHTS und kann weiteren Schaden
+verursachen.
+
+EMPFEHLUNG statt Patch: Da der Alarm schon im Stillstand kommt, ist ein loser
+Z-Stecker der beste erste Ansatz. Wird der Stecker sauber neu gesteckt und ist
+der Kontakt/das Kabel intakt, verschwindet der Alarm evtl. KOMPLETT -> dann
+fahren X UND Z wieder normal, ganz ohne Patch.
+
+--------------------------------------------------------------------------------
+9) EMPFOHLENE NÄCHSTE SCHRITTE
+--------------------------------------------------------------------------------
+1. STROM AUS.
+2. Abgebrochenen Fräser + alle Späne/Reste aus Spindel/Bett/Umfeld entfernen.
+3. Z-MOTORSTECKER (Motor<->Board bzw. am integrierten Treiber hinten am Z-Motor)
+   ab- und WIEDER FEST anstecken; Kabel auf Quetschung/Bruch prüfen (Crash!).
+4. Optional: Foto vom HINTEREN ENDE des Z-Motors (Treiber-Modul + evtl. Fehler-
+   LED), am besten während der Alarm ausgelöst wird.
+5. STROM AN, verbinden, Status lesen:
+   - Kommt nach $X SOFORT wieder "Z motor alarm" (im Stillstand)?  -> weiter 7.
+   - Ist die Maschine ruhig/Idle nach $X?  -> vorsichtig Homing testen.
+6. Homing testen. Fährt Z sauber bis oben zum Z_max?  -> ggf. behoben.
+7. Bleibt der Alarm nach Neu-Stecken/Power-Cycle -> HARDWARE-Defekt Z-Treiber/
+   -Motor -> MAKERA-SUPPORT (Abschnitt 10).
+8. Zugang zum Z-Motor durch X-Verschieben NUR wenn nötig und nur über den
+   bewussten Config-Eingriff (Abschnitt 8A) – Sicherheitsabwägung siehe dort.
+
+--------------------------------------------------------------------------------
+10) FERTIGE FEHLERMELDUNG FÜR MAKERA-SUPPORT (ENGLISH)
+--------------------------------------------------------------------------------
+DEVICE
+- Product:      Makera Carvera AIR (Model CA1)
+- Serial no.:   CA12602B19053   (label on the machine)
+- Machine ID:   19053 (WiFi name CARVERA_AIR_19053)
+- Mainboard:    CarveraAirBoard V1.9
+- Firmware:     1.0.6
+- FCC ID:       2A8Z8-CA1   |   IC: 29569-CA1
+- Input:        100-240VAC 50/60Hz, max 500W
+
+SUBJECT: Z axis drive failure after a tool-change crash (progressively worsening)
+
+WHAT HAPPENED (initial crash):
+During a milling job, in the firmware's automatic M6 tool-length measurement,
+the tool-length probe triggered normally (PRB Z-89.6). The next step
+"G53 G0 Z-20" (Z retract) did NOT move Z up; the machine went into
+"ALARM: Z motor alarm triggered - reset required" (H:24 = MOTOR_ERROR_Z). The
+end mill snapped in the spindle because the sequence continued while Z stayed
+down at the sensor.
+
+SYMPTOMS AND HOW THEY CHANGED (this is the key part):
+1) First: $H homing raised Z only ~7 mm, then "Z motor alarm" + "Homing fail",
+   stopping mid-travel (Z_max never reached).
+2) The Z motor alarm then re-asserted IMMEDIATELY after $X (unlock), at REST,
+   with no motion commanded (driver holds its alarm line active).
+3) DIAGNOSTIC TEST: we temporarily disabled the Z motor-alarm input in
+   config.txt ("gamma_motor_alarm_pin nc") to allow jogging. With that:
+   - SLOW Z jogs worked PERFECTLY: Z moved down 100 mm and back up, smooth,
+     no stall, correct positions. => the motor and mechanics CAN move.
+   - A full auto-leveling probe cycle (many slow Z touches) completed cleanly.
+   - But the FAST Z rapid right after ("G53 G0 Z-3") triggered the fault again.
+     => the failure is SPEED/LOAD DEPENDENT: slow ok, rapid/homing fails.
+4) LATEST (worsening): on power-up the Z motor now only makes a repeated
+   "click-click-click" and does NOT move at all during the boot homing, then
+   goes to alarm/HOME_FAIL. So the Z drive has degraded from "slow-ok" to
+   "stalls/does not move".
+
+VERIFIED SENSOR STATE (so this is NOT a switch problem):
+- M119 + diagnose, repeatedly: X_max:0 Y_max:0 Z_max:0, Probe:0,
+  toolsensor(T):0, P:0,0. Nothing triggered. Wired probe W:0.00. WLAN ok.
+- The low-level motion/endstop/motor-alarm settings are NOT in the user
+  config.txt (compiled into firmware); config-get returns "is not in config".
+
+INTERPRETATION:
+The tool-change crash damaged the Z axis drive. Because a slow move initially
+still worked but fast moves/homing fail, and it has since progressed to a
+stall/clicking with no motion, we suspect the integrated Z closed-loop
+stepper (motor/driver) and/or its wiring (encoder/alarm line), possibly plus
+mechanical damage to the Z lead-screw/coupling from the crash. The controller
+only receives the driver alarm as a single binary pin, so no sub-reason is
+available on the mainboard side.
+
+QUESTIONS TO MAKERA:
+1) How do we reset/clear the Z driver fault (beyond power cycle)?
+2) Given "slow ok, fast/homing stall, now clicking/no motion" after a crash,
+   is this a Z motor, Z driver, wiring, or lead-screw/coupling issue?
+3) What are the correct replacement parts and the service procedure to access
+   the integrated Z closed-loop stepper on the Carvera Air (Model CA1)?
+4) Is this covered under warranty (crash during normal ATC tool measurement)?
+
+NOTE: We have STOPPED operating the machine to avoid further damage to the Z
+drive, and left it powered off.
+
+(Diagnosis performed over the network via a self-built controller talking the
+Carvera framed TCP protocol on port 2222; full technical log in this file.)
+
+================================================================================
+Ende der Fehlerbeschreibung.
+================================================================================

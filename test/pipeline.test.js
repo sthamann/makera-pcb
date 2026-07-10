@@ -165,6 +165,26 @@ test('operations cover every enabled step (clearing, mask removal, laser) in fab
   assert.equal(byId.clearing.separate, undefined);
 });
 
+test('solder-mask removal produces a shallow pad-clearing program + preview', { skip: !havePlatine }, () => {
+  const read = (p) => fs.readFileSync(p, 'utf8');
+  const result = runPipeline({
+    copper: read(files.copper),
+    edge: read(files.edge),
+    drill: read(files.drill),
+    config: { solderMask: { enable: true } },
+  });
+  const name = result.fileNames.maskRemove;
+  assert.ok(name && /soldermask/i.test(name), 'a solder-mask removal file is named');
+  const nc = result.files[name];
+  assert.match(nc, /solder-mask removal/i);
+  // Matches Makera's LED reference (CopperCAM PCB-UV-MASK PART2): normal M6 tool
+  // change WITH auto length measurement, single shallow pass at Z-0.2.
+  assert.match(nc, /M6 T\d/);
+  assert.doesNotMatch(nc, /M493\.2 T\d/);
+  assert.match(nc, /G1 .*Z-0\.2\b/); // shallow cut, Makera's exact depth
+  assert.ok(result.preview.maskRemoval.length > 0, 'preview carries the pad toolpaths');
+});
+
 test('operations shrink again when clearing/laser/solder mask are disabled', { skip: !havePlatine }, () => {
   const read = (p) => fs.readFileSync(p, 'utf8');
   const result = runPipeline({
