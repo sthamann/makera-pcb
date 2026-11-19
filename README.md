@@ -373,3 +373,7 @@ the board placement offset (shifts every operation in the G-code while preview
 and geometry stay board-local, feeds the fit check, snap + clamp rules),
 operation completeness per config, the AI prompt/parse helpers, and an end-to-end run on
 the real I²C board.
+
+## Author
+
+Built by [Stefan Hamann](https://stefan-hamann.de/), co-founder of Shopware and author of the handbook [Agentic Commerce](https://www.agentic-commerce.sh/).
