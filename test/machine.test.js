@@ -158,6 +158,7 @@ function startMockMachine(opts = {}) {
           return;
         }
         if (ptype === PTYPE_CTRL_MULTI) {
+          server.emit('command', data.toString('latin1'));
           // Console commands (ls/cat/echo/...). Output is streamed as normal-info
           // frames; runShell terminates on the echoed sentinel it appends.
           const line = data.toString('latin1').replace(/\n$/, '');
@@ -247,6 +248,20 @@ test('detects the framed protocol and polls status after connecting', async () =
   assert.deepEqual(st.wpos, [1, 2, 3]);
   conn.disconnect();
   server.close();
+});
+
+test('framed command lines go out without a trailing newline', async () => {
+  const { server, port } = await startMockMachine();
+  const conn = new CarveraConnection('127.0.0.1', port);
+  await conn.connect();
+  try {
+    const got = new Promise((resolve) => server.on('command', (c) => { if (c.startsWith('M496')) resolve(c); }));
+    conn.send('M496.3\n');
+    assert.equal(await got, 'M496.3');
+  } finally {
+    conn.disconnect();
+    server.close();
+  }
 });
 
 test('uploads a payload via the framed file protocol, reassembled correctly', async () => {

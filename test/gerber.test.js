@@ -76,3 +76,27 @@ M02*
   // 10x10 minus a disc of r=2 -> ~100 - 12.57
   assert.ok(Math.abs(net - (100 - Math.PI * 4)) < 1, `net ${net}`);
 });
+
+test('a closed loop of traces keeps its hole (pads inside stay separate)', () => {
+  // 1 mm wide square ring of traces, 20 mm across, with a pad in the middle:
+  // forcing every ring positive used to fill the loop and merge the pad into it.
+  const g = `%FSLAX46Y46*%
+%MOMM*%
+%ADD10C,1.000000*%
+%ADD11C,1.500000*%
+D10*
+X0Y0D02*
+X20000000Y0D01*
+X20000000Y20000000D01*
+X0Y20000000D01*
+X0Y0D01*
+D11*
+X10000000Y10000000D03*
+M02*
+`;
+  const polys = toFilledPolygons(parseGerber(g));
+  assert.equal(outerContourCount(polys), 2);
+  const area = polys.reduce((s, r) => s + ringArea(r), 0);
+  // ring ≈ 4 × 20 × 1 = 80 mm², pad ≈ 1.77 mm²; a filled loop would be ≈ 440.
+  assert.ok(Math.abs(area) < 100, `expected ring + pad area < 100, got ${area}`);
+});

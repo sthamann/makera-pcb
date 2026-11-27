@@ -20,7 +20,10 @@ function clamp(v, lo, hi) {
 export function generateClearing(copperPolys, boardBounds, cfg, isoWidth) {
   const c = cfg.clearing;
   const r = c.toolDiameter / 2;
-  const stepover = Math.max(0.05, c.toolDiameter * (1 - clamp(c.stepoverFrac, 0, 0.95)));
+  // Capped at the cutter radius: the innermost ring only reaches a radius
+  // inward, so a larger stepover leaves a strip of copper along the middle
+  // of every pocket.
+  const stepover = Math.max(0.05, Math.min(r, c.toolDiameter * (1 - clamp(c.stepoverFrac, 0, 0.95))));
   // No-go halo around the traces: covers the isolation channel (half its width)
   // plus the tool radius (so the flat tool never nicks a conductor) plus gap.
   const keepGap = isoWidth / 2 + r + c.gap;
@@ -33,7 +36,7 @@ export function generateClearing(copperPolys, boardBounds, cfg, isoWidth) {
     [boardBounds.minX + c.margin, boardBounds.maxY - c.margin],
   ];
 
-  const keep = offsetClosed(union(copperPolys), keepGap);
+  const keep = offsetClosed(union([], copperPolys), keepGap); // keep holes (closed trace loops)
   // The area to clear: the inset board minus the trace halo (holes where copper is).
   const region = difference([rect], keep);
   if (!region.length) {

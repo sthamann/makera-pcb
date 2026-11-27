@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { generateClearing } from '../src/cam/clearing.js';
-import { union, offsetClosed } from '../src/geometry/clipper.js';
+import { union, offsetClosed, offsetOpen, difference, ringArea } from '../src/geometry/clipper.js';
 import { defaultConfig, mergeConfig, isolationToolWidth } from '../src/config.js';
 import { runPipeline } from '../src/pipeline.js';
 
@@ -133,4 +133,21 @@ test('pipeline omits clearing when disabled (default)', { skip: !haveGerbers }, 
   assert.ok(!result.files['1b_clearing.nc']);
   assert.deepEqual(result.preview.clearing, []);
   assert.ok(!result.operations.some((o) => o.id === 'clearing'));
+});
+
+test('clearing leaves no strip in the middle of a pocket', () => {
+  // one small pad on a big board: wide pockets everywhere around it
+  const copper = [[[20, 20], [22, 20], [22, 22], [20, 22]]];
+  const cfg = mergeConfig(defaultConfig, { clearing: { enable: true, toolDiameter: 1.0, stepoverFrac: 0.2 } });
+  const isoWidth = isolationToolWidth(cfg.isolation);
+  const { paths } = generateClearing(copper, { minX: 0, minY: 0, maxX: 40, maxY: 33 }, cfg, isoWidth);
+  // every reachable tool-centre position must lie under the swept cutter
+  const r = cfg.clearing.toolDiameter / 2;
+  const m = cfg.clearing.margin;
+  const rect = [[m, m], [40 - m, m], [40 - m, 33 - m], [m, 33 - m]];
+  const keep = offsetClosed(union(copper), isoWidth / 2 + r + cfg.clearing.gap);
+  const centres = offsetClosed(difference([rect], keep), -r);
+  const swept = offsetOpen(paths.map((q) => [...q, q[0]]), r, true);
+  const missed = difference(centres, swept).reduce((sum, q) => sum + Math.abs(ringArea(q)), 0);
+  assert.ok(missed < 1e-3, `uncovered area in the pockets: ${missed.toFixed(4)} mm²`);
 });

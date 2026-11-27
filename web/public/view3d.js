@@ -36,14 +36,19 @@ function pointInRing(pt, ring) {
 }
 
 // Group flat rings into THREE.Shapes, nesting holes into their parent outer.
+// Outer vs hole comes from the winding (holes run opposite to the largest
+// ring), not from containment: copper inside a hole (pads inside a closed
+// GND loop) is solid again and gets its own shape.
 function buildShapes(rings, cx, cy) {
   const items = rings
     .map((r) => ({ ring: r, area: ringArea(r), abs: Math.abs(ringArea(r)) }))
+    .filter((it) => it.abs > 0)
     .sort((a, b) => b.abs - a.abs);
+  const outerSign = items.length ? Math.sign(items[0].area) : 1;
   const outers = [];
   for (const it of items) {
     const p0 = it.ring[0];
-    const parents = outers.filter((o) => pointInRing(p0, o.ring));
+    const parents = Math.sign(it.area) === outerSign ? [] : outers.filter((o) => pointInRing(p0, o.ring));
     if (parents.length) {
       parents.sort((a, b) => a.abs - b.abs);
       const path = new THREE.Path(it.ring.map(([x, y]) => new THREE.Vector2(x - cx, y - cy)));

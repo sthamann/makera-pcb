@@ -56,11 +56,12 @@ export function generateMaskRemoval(copperPolys, drillGroups, cfg, toolDiameter)
   const detectR = Math.max(0.05, c.padDetectRadius ?? 0.3);
   const maxArea = Math.max(0.1, c.padMaxAreaMm2 ?? 12);
   const padRing = Math.max(0, c.padRing ?? 0.3);
-  const stepover = Math.max(0.05, toolDiameter * (1 - clamp(c.stepoverFrac ?? 0.4, 0, 0.95)));
+  // at most the bit radius, or the pocket leaves a strip along its middle (see clearing.js)
+  const stepover = Math.max(0.05, Math.min(r, toolDiameter * (1 - clamp(c.stepoverFrac ?? 0.4, 0, 0.95))));
   const cutDepth = Math.abs(c.cutDepth ?? 0.05);
   const empty = { paths: [], plunges: [], toolDiameter, stepover, cutDepth };
 
-  const copperU = union(copperPolys || []);
+  const copperU = union([], copperPolys || []); // keep holes (closed trace loops)
   if (!copperU.length) return empty;
 
   // Pad-sized copper islands: wide enough to survive the opening, small enough
