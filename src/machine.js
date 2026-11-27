@@ -399,11 +399,12 @@ export class CarveraConnection extends EventEmitter {
     else this._writeRaw(encodeFrame(PTYPE_CTRL_SINGLE, Buffer.from([0x3f])));
   }
 
-  // MDI / console command (a newline is appended if missing).
+  // MDI / console command. Plain protocol: newline-terminated. Framed: the
+  // frame is the line, so no newline (as the community Carvera Controller sends it).
   send(line) {
     if (this.xmitting) throw new Error('busy uploading');
-    const s = line.endsWith('\n') ? line : line + '\n';
-    if (this.mode === 'plain') this._writeRaw(s);
+    const s = line.replace(/[\r\n]+$/, '');
+    if (this.mode === 'plain') this._writeRaw(s + '\n');
     else this._writeRaw(encodeFrame(PTYPE_CTRL_MULTI, Buffer.from(s)));
   }
 
@@ -674,8 +675,8 @@ export class CarveraConnection extends EventEmitter {
         if (idx >= 0) finish(null, raw.slice(0, idx));
       };
       const write = (line) => {
-        const s = line.endsWith('\n') ? line : line + '\n';
-        if (this.mode === 'plain') this._writeRaw(s);
+        const s = line.replace(/[\r\n]+$/, '');
+        if (this.mode === 'plain') this._writeRaw(s + '\n');
         else this._writeRaw(encodeFrame(PTYPE_CTRL_MULTI, Buffer.from(s, 'latin1')));
       };
       write(command);
