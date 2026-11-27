@@ -1074,8 +1074,13 @@ function bindPreviewInteraction() {
     const nz = Math.max(1, Math.min(40, state.view2d.zoom * factor));
     const ratio = nz / state.view2d.zoom;
     // keep the point under the cursor stationary
-    state.view2d.panX = cx - (cx - state.view2d.panX) * ratio;
-    state.view2d.panY = cy - (cy - state.view2d.panY) * ratio;
+    // fitScene: X = margin + x·eff + panX, Y = cssH − margin − y·eff + panY
+    // (Y grows upward from the bottom edge), so anchor at those origins.
+    const v = state._v2d; // set by drawPreview, which runs before any wheel event gets here
+    if (!v) return;
+    const ox = v.margin; const oy = v.cssH - v.margin;
+    state.view2d.panX = (cx - ox) - (cx - ox - state.view2d.panX) * ratio;
+    state.view2d.panY = (cy - oy) - (cy - oy - state.view2d.panY) * ratio;
     state.view2d.zoom = nz;
     if (nz === 1) { state.view2d.panX = 0; state.view2d.panY = 0; }
     drawPreview();
