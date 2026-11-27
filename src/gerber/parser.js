@@ -314,6 +314,9 @@ function arcSegments(x0, y0, x1, y1, i, j, clockwise) {
 export function toFilledPolygons(parsed) {
   const dark = [];
   const clear = [];
+  // Stroke offsets keep their orientation (holes stay holes), see union().
+  const darkShaped = [];
+  const clearShaped = [];
 
   for (const f of parsed.flashes) {
     const rings = f.aperture.flash(f.x, f.y);
@@ -333,10 +336,10 @@ export function toFilledPolygons(parsed) {
   for (const grp of strokeByWidth.values()) {
     if (grp.width <= 0) continue;
     const rings = offsetOpen(grp.lines, grp.width / 2, true);
-    (grp.polarity === 'C' ? clear : dark).push(...rings);
+    (grp.polarity === 'C' ? clearShaped : darkShaped).push(...rings);
   }
 
-  const positive = union(dark);
-  if (!clear.length) return positive;
-  return difference(positive, union(clear));
+  const positive = union(dark, darkShaped);
+  if (!clear.length && !clearShaped.length) return positive;
+  return difference(positive, union(clear, clearShaped));
 }

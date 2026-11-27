@@ -33,7 +33,7 @@ export function generateClearing(copperPolys, boardBounds, cfg, isoWidth) {
     [boardBounds.minX + c.margin, boardBounds.maxY - c.margin],
   ];
 
-  const keep = offsetClosed(union(copperPolys), keepGap);
+  const keep = offsetClosed(union([], copperPolys), keepGap); // keep holes (closed trace loops)
   // The area to clear: the inset board minus the trace halo (holes where copper is).
   const region = difference([rect], keep);
   if (!region.length) {

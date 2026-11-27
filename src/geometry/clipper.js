@@ -60,12 +60,17 @@ export function circleRing(cx, cy, r, minSegments = 32) {
 // Every input ring is treated as an independent solid: we force each to the
 // same (positive) orientation so overlapping shapes reinforce under the NonZero
 // rule instead of cancelling. Genuine cut-outs are handled via difference().
-export function union(polys) {
-  if (!polys.length) return [];
+//
+// `shaped` rings are added with their orientation untouched: use it for
+// offset results (e.g. a closed loop of traces gives an outer ring plus a
+// hole), which would otherwise turn the hole into solid copper.
+export function union(polys, shaped = []) {
+  if (!polys.length && !shaped.length) return [];
   const paths = toClipper(polys);
   for (const p of paths) {
     if (ClipperLib.Clipper.Area(p) < 0) p.reverse();
   }
+  paths.push(...toClipper(shaped));
   const c = new ClipperLib.Clipper();
   c.AddPaths(paths, ClipperLib.PolyType.ptSubject, true);
   const solution = new ClipperLib.Paths();

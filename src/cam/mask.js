@@ -60,7 +60,7 @@ export function generateMaskRemoval(copperPolys, drillGroups, cfg, toolDiameter)
   const cutDepth = Math.abs(c.cutDepth ?? 0.05);
   const empty = { paths: [], plunges: [], toolDiameter, stepover, cutDepth };
 
-  const copperU = union(copperPolys || []);
+  const copperU = union([], copperPolys || []); // keep holes (closed trace loops)
   if (!copperU.length) return empty;
 
   // Pad-sized copper islands: wide enough to survive the opening, small enough
